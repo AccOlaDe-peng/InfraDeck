@@ -9,8 +9,17 @@ pub const KEYRING_SERVICE: &str = "com.infradeck.desktop";
 pub enum CredentialError {
     #[error("credential id is invalid")]
     InvalidId,
+    #[error("credential not found")]
+    NotFound,
     #[error("credential provider failed: {0}")]
     Provider(String),
+}
+
+fn is_missing_entry(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("no matching entry")
+        || normalized.contains("not found")
+        || normalized.contains("could not be found")
 }
 
 /// Secret bytes are intentionally not serializable, cloneable or displayable.
@@ -73,9 +82,14 @@ impl CredentialProvider for PlatformCredentialProvider {
 
     fn get(&self, id: &str) -> Result<SecretValue, CredentialError> {
         let entry = Self::entry(id)?;
-        let value = entry
-            .get_password()
-            .map_err(|error| CredentialError::Provider(error.to_string()))?;
+        let value = entry.get_password().map_err(|error| {
+            let message = error.to_string();
+            if is_missing_entry(&message) {
+                CredentialError::NotFound
+            } else {
+                CredentialError::Provider(message)
+            }
+        })?;
         SecretValue::new(value)
     }
 
@@ -93,7 +107,7 @@ impl CredentialProvider for PlatformCredentialProvider {
                 value.zeroize();
                 Ok(true)
             }
-            Err(error) if error.to_string().to_lowercase().contains("not found") => Ok(false),
+            Err(error) if is_missing_entry(&error.to_string()) => Ok(false),
             Err(error) => Err(CredentialError::Provider(error.to_string())),
         }
     }
@@ -114,5 +128,14 @@ mod tests {
     fn secret_debug_is_redacted() {
         let secret = SecretValue::new("super-secret".into()).expect("secret");
         assert_eq!(format!("{secret:?}"), "SecretValue([REDACTED])");
+    }
+
+    #[test]
+    fn recognizes_platform_missing_entry_messages() {
+        assert!(is_missing_entry(
+            "No matching entry found in secure storage"
+        ));
+        assert!(is_missing_entry("The item could not be found"));
+        assert!(!is_missing_entry("User denied access to secure storage"));
     }
 }

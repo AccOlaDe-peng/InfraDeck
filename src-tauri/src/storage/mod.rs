@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -117,6 +117,42 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
+
+    pub fn known_host_fingerprint(
+        &self,
+        host: &str,
+        port: u16,
+        key_type: &str,
+    ) -> Result<Option<String>, AppError> {
+        self.conn
+            .query_row(
+                "SELECT fingerprint FROM known_hosts WHERE host=?1 AND port=?2 AND key_type=?3",
+                params![host, port, key_type],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(AppError::from)
+    }
+
+    pub fn save_known_host(
+        &self,
+        host: &str,
+        port: u16,
+        key_type: &str,
+        fingerprint: &str,
+    ) -> Result<(), AppError> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute("INSERT INTO known_hosts(host,port,key_type,fingerprint,first_seen_at,last_seen_at) VALUES (?1,?2,?3,?4,?5,?5) ON CONFLICT(host,port,key_type) DO UPDATE SET fingerprint=excluded.fingerprint,last_seen_at=excluded.last_seen_at", params![host, port, key_type, fingerprint, now])?;
+        Ok(())
+    }
+
+    pub fn list_known_host_fingerprints(&self) -> Result<Vec<(String, u16, String)>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT host, port, fingerprint FROM known_hosts")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +180,13 @@ mod tests {
         let profiles = db.list_server_profiles().expect("list");
         assert_eq!(profiles[0].host, "localhost");
         assert_eq!(profiles[0].tags, vec!["local"]);
+        db.save_known_host("localhost", 22, "ssh-ed25519", "SHA256:test")
+            .expect("known host");
+        assert_eq!(
+            db.known_host_fingerprint("localhost", 22, "ssh-ed25519")
+                .expect("known host lookup")
+                .as_deref(),
+            Some("SHA256:test")
+        );
     }
 }

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppErrorDto, ConnectionDto, HealthCheckDto, ServerProfile, ServerProfileInput } from '../types/contracts';
+import type { AppErrorDto, ConnectionDto, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalSessionDto } from '../types/contracts';
 
 export class AppError extends Error {
   readonly dto: AppErrorDto;
@@ -44,4 +44,8 @@ export const api = {
     call<boolean>('credential_exists', { credentialId }),
   connect: (serverId: string) => call<ConnectionDto>('server_connect', { serverId }),
   disconnect: (connectionId: string) => call<ConnectionDto>('connection_disconnect', { connectionId }),
+  openTerminal: (connectionId: string, options: PtyOptions) => call<TerminalSessionDto>('terminal_open', { connectionId, options }),
+  exec: (connectionId: string, request: ExecRequest) => call<ExecResult>('connection_exec', { connectionId, request }),
+  hostKeyCheck: (host: string, port: number, algorithm: string, fingerprintSha256: string) => call<HostKeyCheckDto>('host_key_check', { host, port, algorithm, fingerprintSha256 }),
+  hostKeyResolve: (decision: HostKeyDecision) => call<void>('host_key_resolve', { decision }),
 };

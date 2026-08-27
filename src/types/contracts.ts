@@ -55,6 +55,63 @@ export interface ConnectionDto {
   disconnectedAt?: string;
 }
 
+export interface PtyOptions {
+  terminalType: 'xterm-256color';
+  cols: number;
+  rows: number;
+  cwd?: string;
+  env: Record<string, string>;
+}
+
+export interface TerminalSessionDto {
+  sessionId: string;
+  terminalId: string;
+  connectionId: string;
+  state: 'opening' | 'open' | 'closing' | 'closed' | 'failed';
+  cols: number;
+  rows: number;
+  openedAt?: string;
+  closedAt?: string;
+  exitCode?: number;
+}
+
+export interface ExecRequest {
+  command: string;
+  timeoutMs: number;
+  cwd?: string;
+  env: Record<string, string>;
+  maxOutputBytes: number;
+}
+
+export interface ExecResult {
+  exitCode?: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  truncated: boolean;
+  stdoutBytes: number;
+  stderrBytes: number;
+  signal?: string;
+}
+
+export type HostKeyStatus = 'unknown' | 'changed' | 'matched';
+export interface HostKeyCheckDto {
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprintSha256: string;
+  status: HostKeyStatus;
+  previousFingerprintSha256?: string;
+}
+export type HostKeyDecisionKind = 'trustOnce' | 'trustAndSave' | 'reject';
+export interface HostKeyDecision {
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprintSha256: string;
+  decision: HostKeyDecisionKind;
+}
+
 export type AppErrorCategory =
   | 'ssh'
   | 'tool'

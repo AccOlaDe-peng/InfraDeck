@@ -7,9 +7,15 @@ use crate::{
     credentials::SecretValue,
     error::AppError,
     models::{HealthCheckDto, ServerProfile, ServerProfileInput},
-    ssh::ConnectionDto,
+    ssh::{
+        hostkey::{
+            decision_allowed, evaluate, HostKeyCheckDto, HostKeyDecision, HostKeyDecisionKind,
+        },
+        ConnectionDto, ExecRequest, ExecResult, PtyOptions, TerminalSessionDto,
+    },
 };
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[tauri::command]
@@ -55,9 +61,19 @@ pub async fn server_connect(
             .find(|item| item.id == server_id)
             .ok_or_else(|| AppError::Validation("服务器配置不存在".into()))?
     };
+    let credential = match &profile.auth {
+        crate::models::AuthRef::Password { credential_id } => {
+            Some(state.credentials.get(credential_id)?)
+        }
+        crate::models::AuthRef::PrivateKey {
+            passphrase_credential_id: Some(credential_id),
+            ..
+        } => Some(state.credentials.get(credential_id)?),
+        _ => None,
+    };
     state
         .ssh
-        .connect(&profile, None)
+        .connect(&profile, credential.as_ref())
         .await
         .map_err(AppError::from)
 }
@@ -73,6 +89,99 @@ pub async fn connection_disconnect(
         .disconnect(&connection_id)
         .await
         .map_err(AppError::from)
+}
+
+#[tauri::command]
+#[instrument(skip(state, options), target = "infradeck::ssh")]
+pub async fn terminal_open(
+    state: State<'_, AppState>,
+    connection_id: String,
+    options: PtyOptions,
+) -> Result<TerminalSessionDto, AppError> {
+    state
+        .ssh
+        .open_pty(&connection_id, options, CancellationToken::new())
+        .await
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+#[instrument(skip(state, request), target = "infradeck::ssh")]
+pub async fn connection_exec(
+    state: State<'_, AppState>,
+    connection_id: String,
+    request: ExecRequest,
+) -> Result<ExecResult, AppError> {
+    state
+        .ssh
+        .exec(&connection_id, request, CancellationToken::new())
+        .await
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::ssh")]
+pub fn host_key_check(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    algorithm: String,
+    fingerprint_sha256: String,
+) -> Result<HostKeyCheckDto, AppError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+    let previous = db.known_host_fingerprint(&host, port, &algorithm)?;
+    Ok(evaluate(
+        &host,
+        port,
+        &algorithm,
+        &fingerprint_sha256,
+        previous.as_deref(),
+    ))
+}
+
+#[tauri::command]
+#[instrument(skip(state, decision), target = "infradeck::ssh")]
+pub fn host_key_resolve(
+    state: State<'_, AppState>,
+    decision: HostKeyDecision,
+) -> Result<(), AppError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+    let previous = db.known_host_fingerprint(&decision.host, decision.port, &decision.algorithm)?;
+    let check = evaluate(
+        &decision.host,
+        decision.port,
+        &decision.algorithm,
+        &decision.fingerprint_sha256,
+        previous.as_deref(),
+    );
+    if !decision_allowed(check.status, decision.decision) {
+        return Err(AppError::Validation(
+            "当前 Host Key 状态不允许该决策".into(),
+        ));
+    }
+    if matches!(
+        decision.decision,
+        HostKeyDecisionKind::TrustOnce | HostKeyDecisionKind::TrustAndSave
+    ) {
+        state
+            .host_keys
+            .add(&decision.host, decision.port, &decision.fingerprint_sha256);
+    }
+    if matches!(decision.decision, HostKeyDecisionKind::TrustAndSave) {
+        db.save_known_host(
+            &decision.host,
+            decision.port,
+            &decision.algorithm,
+            &decision.fingerprint_sha256,
+        )?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

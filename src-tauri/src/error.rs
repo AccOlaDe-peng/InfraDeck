@@ -14,19 +14,44 @@ pub enum AppError {
     Internal(String),
     #[error("credential provider error: {0}")]
     Credential(String),
+    #[error("credential not found")]
+    CredentialNotFound,
     #[error("ssh error: {0}")]
     Ssh(String),
+    #[error("SSH host key verification required")]
+    SshHostKeyRequired {
+        host: String,
+        port: u16,
+        algorithm: String,
+        fingerprint_sha256: String,
+    },
 }
 
 impl From<CredentialError> for AppError {
     fn from(error: CredentialError) -> Self {
-        Self::Credential(error.to_string())
+        match error {
+            CredentialError::NotFound => Self::CredentialNotFound,
+            other => Self::Credential(other.to_string()),
+        }
     }
 }
 
 impl From<SshError> for AppError {
     fn from(error: SshError) -> Self {
-        Self::Ssh(error.to_string())
+        match error {
+            SshError::HostKeyRequired {
+                host,
+                port,
+                algorithm,
+                fingerprint_sha256,
+            } => Self::SshHostKeyRequired {
+                host,
+                port,
+                algorithm,
+                fingerprint_sha256,
+            },
+            other => Self::Ssh(other.to_string()),
+        }
     }
 }
 
@@ -47,14 +72,27 @@ impl AppError {
             Self::Storage(_) => ("STORAGE_ERROR", "storage", true),
             Self::Internal(_) => ("INTERNAL_ERROR", "unknown", true),
             Self::Credential(_) => ("CREDENTIAL_PROVIDER_ERROR", "credential", false),
+            Self::CredentialNotFound => ("CREDENTIAL_NOT_FOUND", "credential", false),
             Self::Ssh(_) => ("SSH_ERROR", "ssh", true),
+            Self::SshHostKeyRequired { .. } => ("SSH_HOST_KEY_REQUIRED", "ssh", false),
+        };
+        let details = match self {
+            Self::SshHostKeyRequired {
+                host,
+                port,
+                algorithm,
+                fingerprint_sha256,
+            } => {
+                json!({ "host": host, "port": port, "algorithm": algorithm, "fingerprintSha256": fingerprint_sha256 })
+            }
+            _ => json!({}),
         };
         AppErrorDto {
             code: code.into(),
             message: self.to_string(),
             retryable,
             category: category.into(),
-            details: Some(json!({})),
+            details: Some(details),
         }
     }
 }

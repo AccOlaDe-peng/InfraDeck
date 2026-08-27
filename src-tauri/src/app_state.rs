@@ -2,7 +2,10 @@ use crate::{
     config::{AppSettings, PermissionMode, SecretProvider, SecretReference, WorkspaceSettings},
     credentials::{CredentialProvider, PlatformCredentialProvider},
     error::AppError,
-    ssh::{MockSshProvider, SshManager},
+    ssh::{
+        real::{HostKeyTrustStore, RusshProvider},
+        SshManager, SshProvider,
+    },
     storage::Database,
 };
 use std::sync::{Arc, Mutex};
@@ -10,7 +13,8 @@ use std::sync::{Arc, Mutex};
 pub struct AppState {
     pub db: Mutex<Database>,
     pub credentials: Arc<dyn CredentialProvider>,
-    pub ssh: SshManager<MockSshProvider>,
+    pub ssh: SshManager<Box<dyn SshProvider>>,
+    pub host_keys: Arc<HostKeyTrustStore>,
 }
 
 impl AppState {
@@ -26,10 +30,15 @@ impl AppState {
             provider: SecretProvider::OsKeychain,
         };
         let _permission_mode = PermissionMode::ConfirmChanges;
+        let database = Database::open_default()?;
+        let host_keys = Arc::new(HostKeyTrustStore::default());
+        host_keys.load(database.list_known_host_fingerprints()?);
+        let provider: Box<dyn SshProvider> = Box::new(RusshProvider::new(Arc::clone(&host_keys)));
         Ok(Self {
-            db: Mutex::new(Database::open_default()?),
+            db: Mutex::new(database),
             credentials: Arc::new(PlatformCredentialProvider),
-            ssh: SshManager::new(MockSshProvider),
+            ssh: SshManager::new(provider),
+            host_keys,
         })
     }
 }
