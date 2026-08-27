@@ -9,6 +9,8 @@ use tracing::{info, instrument};
 use crate::{
     error::AppError,
     models::{AuthRef, Environment, ServerProfile},
+    policy::{ApprovalRecord, ApprovalStatus},
+    tools::AuditEvent,
 };
 
 pub struct Database {
@@ -45,6 +47,7 @@ impl Database {
         let migrations: &[(i64, &str)] = &[
             (1, include_str!("../../migrations/0001_initial.sql")),
             (2, include_str!("../../migrations/0002_v01_contracts.sql")),
+            (3, include_str!("../../migrations/0003_tool_policy.sql")),
         ];
         for (version, sql) in migrations.iter().filter(|(version, _)| *version > current) {
             let tx = self.conn.transaction()?;
@@ -153,6 +156,73 @@ impl Database {
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
+
+    pub fn append_audit(&self, event: &AuditEvent) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT INTO audit_events(id,timestamp,workspace_id,actor,server_id,connection_id,conversation_id,agent_run_id,action,tool_name,tool_version,tool_call_id,approval_id,risk_level,policy_action,outcome,arguments_digest,details_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            params![event.id,event.timestamp,event.workspace_id,event.actor,event.server_id,event.connection_id,event.conversation_id,event.agent_run_id,event.action,event.tool_name,event.tool_version,event.tool_call_id,event.approval_id,event.risk_level,event.policy_action,event.outcome,event.arguments_digest,serde_json::to_string(&event.sanitized_details).map_err(|error| AppError::Internal(error.to_string()))?],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_audit(&self, limit: usize) -> Result<Vec<AuditEvent>, AppError> {
+        let mut stmt = self.conn.prepare("SELECT id,timestamp,workspace_id,actor,server_id,connection_id,conversation_id,agent_run_id,action,tool_name,tool_version,tool_call_id,approval_id,risk_level,policy_action,outcome,arguments_digest,details_json FROM audit_events ORDER BY timestamp DESC LIMIT ?1")?;
+        let rows = stmt.query_map([limit.min(500) as i64], |row| {
+            let details: String = row.get(17)?;
+            Ok(AuditEvent {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                workspace_id: row.get(2)?,
+                actor: row.get(3)?,
+                server_id: row.get(4)?,
+                connection_id: row.get(5)?,
+                conversation_id: row.get(6)?,
+                agent_run_id: row.get(7)?,
+                action: row.get(8)?,
+                tool_name: row.get(9)?,
+                tool_version: row.get(10)?,
+                tool_call_id: row.get(11)?,
+                approval_id: row.get(12)?,
+                risk_level: row.get(13)?,
+                policy_action: row.get(14)?,
+                outcome: row.get(15)?,
+                arguments_digest: row.get(16)?,
+                sanitized_details: serde_json::from_str(&details).unwrap_or_default(),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn create_approval(&self, approval: &ApprovalRecord) -> Result<(), AppError> {
+        self.conn.execute("INSERT INTO approvals(id,tool_call_id,request_hash,risk_level,summary,impact_json,status,created_at,expires_at) VALUES (?1,?2,?3,?4,?5,?6,'pending',?7,?8)", params![approval.id,approval.tool_call_id,approval.request_hash,approval.risk_level,approval.summary,serde_json::to_string(&approval.impact).map_err(|error| AppError::Internal(error.to_string()))?,approval.created_at,approval.expires_at])?;
+        Ok(())
+    }
+
+    pub fn approval(&self, id: &str) -> Result<Option<ApprovalRecord>, AppError> {
+        self.conn.query_row("SELECT id,tool_call_id,request_hash,risk_level,summary,impact_json,status,created_at,expires_at FROM approvals WHERE id=?1", [id], |row| {
+            let status: String = row.get(6)?;
+            let impact: String = row.get(5)?;
+            Ok(ApprovalRecord { id: row.get(0)?, tool_call_id: row.get(1)?, request_hash: row.get(2)?, risk_level: row.get(3)?, summary: row.get(4)?, impact: serde_json::from_str(&impact).unwrap_or_default(), status: ApprovalStatus::parse(&status), created_at: row.get(7)?, expires_at: row.get(8)? })
+        }).optional().map_err(AppError::from)
+    }
+
+    pub fn resolve_approval(
+        &mut self,
+        id: &str,
+        from: ApprovalStatus,
+        to: ApprovalStatus,
+        actor: &str,
+    ) -> Result<bool, AppError> {
+        let tx = self.conn.transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let changed = tx.execute("UPDATE approvals SET status=?1,approved_by=?2,resolved_at=?3,consumed_at=CASE WHEN ?1='consumed' THEN ?3 ELSE consumed_at END WHERE id=?4 AND status=?5", params![to.as_str(),actor,now,id,from.as_str()])? == 1;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn expire_stale_approvals(&self) -> Result<usize, AppError> {
+        self.conn.execute("UPDATE approvals SET status='expired',resolved_at=?1 WHERE status IN ('pending','approved')", [Utc::now().to_rfc3339()]).map_err(AppError::from)
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +231,7 @@ mod tests {
     use uuid::Uuid;
     #[test]
     fn migrates_and_round_trips_server_profile() {
-        let db = Database::open(":memory:").expect("database");
+        let mut db = Database::open(":memory:").expect("database");
         let profile = ServerProfile {
             id: Uuid::new_v4().to_string(),
             name: "test".into(),
@@ -188,5 +258,73 @@ mod tests {
                 .as_deref(),
             Some("SHA256:test")
         );
+
+        let request = crate::policy::ApprovalRequest {
+            approval_id: Uuid::new_v4().to_string(),
+            tool_call_id: Uuid::new_v4().to_string(),
+            request_hash: "hash".into(),
+            risk: crate::policy::RiskAssessment {
+                level: crate::policy::RiskLevel::Caution,
+                score: 50,
+                reasons: vec![],
+                matched_rules: vec![],
+            },
+            summary: "restart".into(),
+            target_label: "server/nginx".into(),
+            impact: vec!["restart service".into()],
+            proposed_change: None,
+            expires_at: (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            required_confirmation: crate::policy::RequiredConfirmation::Button,
+        };
+        db.create_approval(&crate::policy::record(&request))
+            .expect("create approval");
+        assert!(db
+            .resolve_approval(
+                &request.approval_id,
+                ApprovalStatus::Pending,
+                ApprovalStatus::Approved,
+                "user"
+            )
+            .expect("approve"));
+        assert!(db
+            .resolve_approval(
+                &request.approval_id,
+                ApprovalStatus::Approved,
+                ApprovalStatus::Consumed,
+                "user"
+            )
+            .expect("consume"));
+        assert!(!db
+            .resolve_approval(
+                &request.approval_id,
+                ApprovalStatus::Approved,
+                ApprovalStatus::Consumed,
+                "user"
+            )
+            .expect("block replay"));
+
+        let event = crate::tools::AuditEvent {
+            id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            workspace_id: "default".into(),
+            actor: "user".into(),
+            server_id: Some(profile.id),
+            connection_id: None,
+            conversation_id: None,
+            agent_run_id: None,
+            action: "tool.execute".into(),
+            tool_name: Some("system.memory".into()),
+            tool_version: Some("1.0.0".into()),
+            tool_call_id: Some(Uuid::new_v4().to_string()),
+            approval_id: None,
+            risk_level: Some("safe".into()),
+            policy_action: Some("allow".into()),
+            outcome: "success".into(),
+            arguments_digest: Some("digest".into()),
+            sanitized_details: serde_json::Map::new(),
+        };
+        db.append_audit(&event).expect("append audit");
+        let events = db.list_audit(10).expect("list audit");
+        assert_eq!(events[0].id, event.id);
     }
 }

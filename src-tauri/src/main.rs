@@ -5,8 +5,10 @@ mod credentials;
 mod error;
 mod models;
 mod platform;
+mod policy;
 mod ssh;
 mod storage;
+mod tools;
 
 use app_state::AppState;
 
@@ -33,6 +35,10 @@ fn main() {
             commands::credential_set,
             commands::credential_delete,
             commands::credential_exists,
+            commands::tool_definitions_list,
+            commands::tool_execute,
+            commands::approval_resolve,
+            commands::audit_events_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running InfraDeck");

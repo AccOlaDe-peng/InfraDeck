@@ -7,14 +7,19 @@ use crate::{
         SshManager, SshProvider,
     },
     storage::Database,
+    tools::ToolCall,
 };
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 pub struct AppState {
     pub db: Mutex<Database>,
     pub credentials: Arc<dyn CredentialProvider>,
     pub ssh: SshManager<Box<dyn SshProvider>>,
     pub host_keys: Arc<HostKeyTrustStore>,
+    pub pending_tool_calls: Mutex<HashMap<String, ToolCall>>,
 }
 
 impl AppState {
@@ -31,6 +36,7 @@ impl AppState {
         };
         let _permission_mode = PermissionMode::ConfirmChanges;
         let database = Database::open_default()?;
+        database.expire_stale_approvals()?;
         let host_keys = Arc::new(HostKeyTrustStore::default());
         host_keys.load(database.list_known_host_fingerprints()?);
         let provider: Box<dyn SshProvider> = Box::new(RusshProvider::new(Arc::clone(&host_keys)));
@@ -39,6 +45,7 @@ impl AppState {
             credentials: Arc::new(PlatformCredentialProvider),
             ssh: SshManager::new(provider),
             host_keys,
+            pending_tool_calls: Mutex::new(HashMap::new()),
         })
     }
 }

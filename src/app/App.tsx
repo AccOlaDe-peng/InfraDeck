@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, AppError } from '../lib/tauri';
-import type { AuthRef, ConnectionDto, Environment, HealthCheckDto, ExecResult, ServerProfile, ServerProfileInput } from '../types/contracts';
+import type { ApprovalRequest, AuthRef, ConnectionDto, Environment, HealthCheckDto, ExecResult, ResourceTarget, ServerProfile, ServerProfileInput, ToolResult } from '../types/contracts';
 
 type HostKeyPrompt = { serverId: string; host: string; port: number; algorithm: string; fingerprintSha256: string };
 
@@ -40,6 +40,8 @@ export default function App() {
   const [outputs, setOutputs] = useState<Record<string, ExecResult>>({});
   const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt>();
   const [editingProfileId, setEditingProfileId] = useState<string>();
+  const [pendingApproval, setPendingApproval] = useState<ApprovalRequest>();
+  const [toolResults, setToolResults] = useState<Record<string, ToolResult>>({});
 
   const refresh = async () => {
     setError(undefined);
@@ -195,6 +197,32 @@ export default function App() {
     }
   };
 
+  const runTool = async (item: ServerProfile, name: string, input: Record<string, unknown>, target: ResourceTarget = { kind: 'server', serverId: item.id }) => {
+    setConnectionBusy(item.id); setError(undefined);
+    try {
+      const response = await api.executeTool({ id: crypto.randomUUID(), name, version: '1.0.0', input, target, requestedAt: new Date().toISOString() });
+      if (response.kind === 'approvalRequired') { setPendingApproval(response.approval); setNotice('操作需要安全确认。'); }
+      else { setToolResults((current) => ({ ...current, [item.id]: response.result })); setNotice(response.result.summary); }
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setConnectionBusy(undefined); }
+  };
+
+  const resolveApproval = async (decision: 'approve' | 'reject') => {
+    if (!pendingApproval) return;
+    const typedConfirmation = pendingApproval.requiredConfirmation === 'typeTarget' && decision === 'approve' ? window.prompt(`请输入目标以确认：${pendingApproval.targetLabel}`) ?? undefined : undefined;
+    try {
+      const response = await api.resolveApproval({ approvalId: pendingApproval.approvalId, requestHash: pendingApproval.requestHash, decision, typedConfirmation });
+      setPendingApproval(undefined);
+      if (response.kind === 'result') { setToolResults((current) => ({ ...current, approval: response.result })); setNotice(response.result.summary); }
+    } catch (cause) { setError(errorMessage(cause)); }
+  };
+
+  const restartService = async (item: ServerProfile) => {
+    const service = window.prompt('输入要重启的 systemd 服务名（例如 nginx）')?.trim();
+    if (!service) return;
+    await runTool(item, 'service.restart', { service }, { kind: 'service', serverId: item.id, service });
+  };
+
   const runCheck = async (item: ServerProfile) => {
     const connection = connections[item.id];
     if (!connection) return;
@@ -236,6 +264,7 @@ export default function App() {
       {(error || notice) && <div className={error ? 'banner error' : 'banner success'}>{error ?? notice}</div>}
 
       {hostKeyPrompt && <section className="hostkey-card"><div><p className="eyebrow">HOST KEY VERIFICATION</p><h3>首次连接需要确认服务器指纹</h3><p>{hostKeyPrompt.host}:{hostKeyPrompt.port} · {hostKeyPrompt.algorithm}</p><code>{hostKeyPrompt.fingerprintSha256}</code></div><div className="hostkey-actions"><button className="small-button" onClick={() => void resolveHostKey('trustOnce')}>仅本次信任</button><button className="small-button connect" onClick={() => void resolveHostKey('trustAndSave')}>信任并保存</button><button className="small-button danger" onClick={() => void resolveHostKey('reject')}>拒绝</button></div></section>}
+      {pendingApproval && <section className="hostkey-card"><div><p className="eyebrow">APPROVAL REQUIRED · {pendingApproval.risk.level.toUpperCase()}</p><h3>{pendingApproval.summary}</h3><p>{pendingApproval.targetLabel}</p><small>{pendingApproval.impact.join('；')}</small></div><div className="hostkey-actions"><button className="small-button connect" onClick={() => void resolveApproval('approve')}>批准执行</button><button className="small-button danger" onClick={() => void resolveApproval('reject')}>拒绝</button></div></section>}
 
       <section className="content-grid">
         <form className="panel form-panel" onSubmit={submit}>
@@ -261,7 +290,7 @@ export default function App() {
 
         <section className="panel profiles-panel">
           <div className="panel-heading"><div><p className="eyebrow">PERSISTED PROFILES</p><h3>服务器列表</h3></div><span className="count">{profiles.length}</span></div>
-          {profiles.length === 0 ? <div className="empty-state"><span>◎</span><p>还没有服务器配置</p><small>保存第一个 Profile，验证 SQLite 与 IPC 链路。</small></div> : <div className="profile-list">{profiles.map((item) => { const connection = connections[item.id]; const result = outputs[item.id]; const busyConnection = connectionBusy === item.id; const authLabel = item.auth.kind === 'agent' ? 'Agent' : item.auth.kind === 'password' ? '密码' : '私钥'; return <article className="profile-item" key={item.id}><div className="server-icon">⌁</div><div className="profile-main"><strong>{item.name}</strong><span>{item.username}@{item.host}:{item.port} · {authLabel}</span>{connection && <small className={`connection-state ${connection.state}`}>{connection.state === 'connected' ? '已连接' : connection.state}</small>}{result && <code className="exec-output">{result.stdout || result.stderr}</code>}</div><span className={`environment ${item.environment}`}>{item.environment}</span><div className="profile-actions"><button className="small-button" onClick={() => editProfile(item)}>编辑</button>{connection?.state === 'connected' ? <><button className="small-button" disabled={busyConnection} onClick={() => void runCheck(item)}>测试命令</button><button className="small-button" disabled={busyConnection} onClick={() => void reconnect(item)}>重连</button><button className="small-button danger" disabled={busyConnection} onClick={() => void disconnect(item)}>断开</button></> : <button className="small-button connect" disabled={busyConnection} onClick={() => void connect(item)}>{busyConnection ? '连接中…' : '连接'}</button>}</div></article>; })}</div>}
+          {profiles.length === 0 ? <div className="empty-state"><span>◎</span><p>还没有服务器配置</p><small>保存第一个 Profile，验证 SQLite 与 IPC 链路。</small></div> : <div className="profile-list">{profiles.map((item) => { const connection = connections[item.id]; const result = outputs[item.id]; const toolResult = toolResults[item.id]; const busyConnection = connectionBusy === item.id; const authLabel = item.auth.kind === 'agent' ? 'Agent' : item.auth.kind === 'password' ? '密码' : '私钥'; return <article className="profile-item" key={item.id}><div className="server-icon">⌁</div><div className="profile-main"><strong>{item.name}</strong><span>{item.username}@{item.host}:{item.port} · {authLabel}</span>{connection && <small className={`connection-state ${connection.state}`}>{connection.state === 'connected' ? '已连接' : connection.state}</small>}{result && <code className="exec-output">{result.stdout || result.stderr}</code>}{toolResult && <code className="exec-output">{toolResult.summary}</code>}</div><span className={`environment ${item.environment}`}>{item.environment}</span><div className="profile-actions"><button className="small-button" onClick={() => editProfile(item)}>编辑</button>{connection?.state === 'connected' ? <><button className="small-button" disabled={busyConnection} onClick={() => void runTool(item, 'system.memory', {})}>内存</button><button className="small-button" disabled={busyConnection} onClick={() => void runTool(item, 'system.disk', { path: '/' })}>磁盘</button><button className="small-button" disabled={busyConnection} onClick={() => void restartService(item)}>重启服务</button><button className="small-button" disabled={busyConnection} onClick={() => void runCheck(item)}>测试命令</button><button className="small-button" disabled={busyConnection} onClick={() => void reconnect(item)}>重连</button><button className="small-button danger" disabled={busyConnection} onClick={() => void disconnect(item)}>断开</button></> : <button className="small-button connect" disabled={busyConnection} onClick={() => void connect(item)}>{busyConnection ? '连接中…' : '连接'}</button>}</div></article>; })}</div>}
         </section>
       </section>
 

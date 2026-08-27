@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppErrorDto, ConnectionDto, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalSessionDto } from '../types/contracts';
+import type { ApprovalGrant, AuditEvent, AppErrorDto, ConnectionDto, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse } from '../types/contracts';
 
 export class AppError extends Error {
   readonly dto: AppErrorDto;
@@ -49,4 +49,8 @@ export const api = {
   exec: (connectionId: string, request: ExecRequest) => call<ExecResult>('connection_exec', { connectionId, request }),
   hostKeyCheck: (host: string, port: number, algorithm: string, fingerprintSha256: string) => call<HostKeyCheckDto>('host_key_check', { host, port, algorithm, fingerprintSha256 }),
   hostKeyResolve: (decision: HostKeyDecision) => call<void>('host_key_resolve', { decision }),
+  listToolDefinitions: (serverId?: string) => call<ToolDefinition[]>('tool_definitions_list', { serverId }),
+  executeTool: (toolCall: ToolCall) => call<ToolExecutionResponse>('tool_execute', { call: toolCall }),
+  resolveApproval: (grant: ApprovalGrant) => call<ToolExecutionResponse>('approval_resolve', { grant }),
+  listAuditEvents: (limit = 100) => call<AuditEvent[]>('audit_events_list', { limit }),
 };

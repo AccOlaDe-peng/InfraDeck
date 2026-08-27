@@ -1,6 +1,6 @@
 use crate::credentials::CredentialError;
 use crate::ssh::SshError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -55,7 +55,8 @@ impl From<SshError> for AppError {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppErrorDto {
     pub code: String,
     pub message: String,

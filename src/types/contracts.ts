@@ -129,3 +129,14 @@ export interface AppErrorDto {
   category: AppErrorCategory;
   details?: Record<string, unknown>;
 }
+
+export interface ToolMetadata { mutation: boolean; riskHint: 'safe' | 'caution' | 'high'; requiresPrivilege: boolean; timeoutMs: number; supportsBatch: boolean; capabilities: string[]; }
+export interface ToolDefinition { name: string; version: string; title: string; description: string; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown>; metadata: ToolMetadata; }
+export type ResourceTarget = { kind: 'server'; serverId: ServerId } | { kind: 'service'; serverId: ServerId; service: string } | { kind: 'process'; serverId: ServerId; pid: number };
+export interface ToolCall { id: string; name: string; version: string; input: Record<string, unknown>; target: ResourceTarget; requestedAt: string; conversationId?: string; agentRunId?: string; }
+export interface RiskAssessment { level: 'safe' | 'caution' | 'high' | 'blocked'; score: number; reasons: string[]; matchedRules: string[]; }
+export interface ApprovalRequest { approvalId: string; toolCallId: string; requestHash: string; risk: RiskAssessment; summary: string; targetLabel: string; impact: string[]; proposedChange?: { kind: 'action' | 'diff'; summary: string; before?: string; after?: string; verificationSteps: string[] }; expiresAt: string; requiredConfirmation: 'button' | 'typeTarget'; }
+export interface ApprovalGrant { approvalId: string; requestHash: string; decision: 'approve' | 'reject'; typedConfirmation?: string; }
+export interface ToolResult { callId: string; status: 'success' | 'failed' | 'denied' | 'cancelled' | 'partial'; data?: unknown; summary: string; evidence: Array<{ kind: string; label: string; digestSha256?: string; sanitizedExcerpt?: string }>; changedResources: ResourceTarget[]; warnings: string[]; error?: AppErrorDto; meta: { durationMs: number; truncated: boolean; startedAt: string; finishedAt: string; auditId: string }; }
+export type ToolExecutionResponse = { kind: 'result'; result: ToolResult } | { kind: 'approvalRequired'; approval: ApprovalRequest };
+export interface AuditEvent { id: string; timestamp: string; workspaceId: string; actor: 'user' | 'ai' | 'system'; serverId?: string; connectionId?: string; action: string; toolName?: string; toolVersion?: string; toolCallId?: string; approvalId?: string; riskLevel?: string; policyAction?: string; outcome: string; argumentsDigest?: string; sanitizedDetails: Record<string, unknown>; }

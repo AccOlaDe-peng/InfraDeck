@@ -374,6 +374,14 @@ impl<P: SshProvider> SshManager<P> {
         self.connect(profile, credential).await
     }
 
+    pub async fn active_connection_id(&self, server_id: &str) -> Option<String> {
+        let registry = self.registry.lock().await;
+        registry.iter().find_map(|(id, (connection, _))| {
+            (connection.server_id == server_id && connection.state == ConnectionState::Connected)
+                .then(|| id.clone())
+        })
+    }
+
     pub async fn open_pty(
         &self,
         connection_id: &str,

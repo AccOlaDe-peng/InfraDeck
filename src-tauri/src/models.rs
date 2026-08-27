@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub type ServerId = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Environment {
     Dev,

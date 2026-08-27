@@ -7,13 +7,21 @@ use crate::{
     credentials::SecretValue,
     error::AppError,
     models::{HealthCheckDto, ServerProfile, ServerProfileInput},
+    policy::{
+        self, ApprovalDecision, ApprovalGrant, ApprovalStatus, PolicyDecision, RequiredConfirmation,
+    },
     ssh::{
         hostkey::{
             decision_allowed, evaluate, HostKeyCheckDto, HostKeyDecision, HostKeyDecisionKind,
         },
         ConnectionDto, ExecRequest, ExecResult, PtyOptions, TerminalSessionDto,
     },
+    tools::{
+        self, AuditEvent, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult,
+        ToolResultMeta,
+    },
 };
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -150,6 +158,385 @@ pub async fn connection_exec(
         .exec(&connection_id, request, CancellationToken::new())
         .await
         .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub fn tool_definitions_list(_server_id: Option<String>) -> Vec<ToolDefinition> {
+    tools::definitions()
+}
+
+#[tauri::command]
+#[instrument(skip(state, call), target = "infradeck::tool")]
+pub async fn tool_execute(
+    state: State<'_, AppState>,
+    call: ToolCall,
+) -> Result<ToolExecutionResponse, AppError> {
+    let definition = match tools::resolve(&call.name, &call.version) {
+        Some(value) => value,
+        None => {
+            return Ok(ToolExecutionResponse::Result {
+                result: rejected_result(&call, "TOOL_NOT_FOUND", "工具或版本不存在", "failed"),
+            })
+        }
+    };
+    if let Err(message) = tools::validate_call(&call, &definition) {
+        let result = rejected_result(&call, "TOOL_SCHEMA_INVALID", &message, "failed");
+        append_tool_audit(&state, &call, None, "deny", &result)?;
+        return Ok(ToolExecutionResponse::Result { result });
+    }
+    let profile = profile_for(&state, call.target.server_id())?;
+    let privilege = if profile.username == "root" {
+        "root"
+    } else if definition.metadata.requires_privilege {
+        "sudo"
+    } else {
+        "user"
+    };
+    match policy::evaluate(&definition, &call, profile.environment, privilege) {
+        PolicyDecision::Deny(risk, reason) => {
+            let mut result = rejected_result(&call, "POLICY_DENIED", &reason, "denied");
+            result.meta.audit_id = uuid::Uuid::new_v4().to_string();
+            append_tool_audit(&state, &call, Some(&risk), "deny", &result)?;
+            Ok(ToolExecutionResponse::Result { result })
+        }
+        PolicyDecision::Confirm(risk) => {
+            let approval = policy::approval_request(&definition, &call, risk.clone());
+            {
+                let db = state
+                    .db
+                    .lock()
+                    .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+                db.create_approval(&policy::record(&approval))?;
+            }
+            state
+                .pending_tool_calls
+                .lock()
+                .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
+                .insert(approval.approval_id.clone(), call.clone());
+            let event = audit_for(
+                &call,
+                Some(&risk),
+                "confirm",
+                "success",
+                Some(approval.approval_id.clone()),
+                serde_json::json!({"approvalCreated":true}),
+            );
+            state
+                .db
+                .lock()
+                .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+                .append_audit(&event)?;
+            Ok(ToolExecutionResponse::ApprovalRequired { approval })
+        }
+        PolicyDecision::Allow(risk) => execute_allowed(&state, call, risk, "allow", None).await,
+    }
+}
+
+#[tauri::command]
+#[instrument(skip(state, grant), target = "infradeck::policy")]
+pub async fn approval_resolve(
+    state: State<'_, AppState>,
+    grant: ApprovalGrant,
+) -> Result<ToolExecutionResponse, AppError> {
+    let record = state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .approval(&grant.approval_id)?
+        .ok_or_else(|| AppError::Validation("approval 不存在".into()))?;
+    let pending = state
+        .pending_tool_calls
+        .lock()
+        .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
+        .get(&grant.approval_id)
+        .cloned();
+    if record.status != ApprovalStatus::Pending || pending.is_none() {
+        return Ok(ToolExecutionResponse::Result {
+            result: replay_denied(record.tool_call_id, "approval 已过期、消费或无法恢复"),
+        });
+    }
+    let call = pending.expect("checked pending");
+    if grant.request_hash != record.request_hash || grant.request_hash.is_empty() {
+        return Ok(ToolExecutionResponse::Result {
+            result: replay_denied(call.id.clone(), "approval hash 不匹配"),
+        });
+    }
+    let expires = DateTime::parse_from_rfc3339(&record.expires_at)
+        .map_err(|error| AppError::Internal(error.to_string()))?
+        .with_timezone(&Utc);
+    if expires <= Utc::now() {
+        state
+            .db
+            .lock()
+            .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+            .resolve_approval(
+                &grant.approval_id,
+                ApprovalStatus::Pending,
+                ApprovalStatus::Expired,
+                "user",
+            )?;
+        state
+            .pending_tool_calls
+            .lock()
+            .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
+            .remove(&grant.approval_id);
+        return Ok(ToolExecutionResponse::Result {
+            result: replay_denied(call.id, "approval 已过期"),
+        });
+    }
+    if grant.decision == ApprovalDecision::Reject {
+        state
+            .db
+            .lock()
+            .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+            .resolve_approval(
+                &grant.approval_id,
+                ApprovalStatus::Pending,
+                ApprovalStatus::Rejected,
+                "user",
+            )?;
+        state
+            .pending_tool_calls
+            .lock()
+            .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
+            .remove(&grant.approval_id);
+        return Ok(ToolExecutionResponse::Result {
+            result: replay_denied(call.id, "用户拒绝执行"),
+        });
+    }
+    let definition = tools::resolve(&call.name, &call.version)
+        .ok_or_else(|| AppError::Validation("工具不存在".into()))?;
+    let profile = profile_for(&state, call.target.server_id())?;
+    let privilege = if profile.username == "root" {
+        "root"
+    } else {
+        "sudo"
+    };
+    let risk = match policy::evaluate(&definition, &call, profile.environment, privilege) {
+        PolicyDecision::Confirm(value) => value,
+        _ => {
+            return Ok(ToolExecutionResponse::Result {
+                result: replay_denied(call.id, "policy 已变化"),
+            })
+        }
+    };
+    if let Err(reason) = policy::validate_approval(
+        &record,
+        &grant,
+        &policy::request_hash(&definition, &call, &risk),
+        &call.target.label(),
+        Utc::now(),
+    ) {
+        return Ok(ToolExecutionResponse::Result {
+            result: replay_denied(call.id, reason),
+        });
+    }
+    if policy::request_hash(&definition, &call, &risk) != grant.request_hash {
+        return Ok(ToolExecutionResponse::Result {
+            result: replay_denied(call.id, "approval 参数已变化"),
+        });
+    }
+    let expected = call.target.label();
+    let required = if risk.level == policy::RiskLevel::High {
+        RequiredConfirmation::TypeTarget
+    } else {
+        RequiredConfirmation::Button
+    };
+    if required == RequiredConfirmation::TypeTarget
+        && grant.typed_confirmation.as_deref().map(str::trim) != Some(expected.as_str())
+    {
+        return Ok(ToolExecutionResponse::Result {
+            result: replay_denied(call.id, "高风险确认文本不匹配"),
+        });
+    }
+    {
+        let mut db = state
+            .db
+            .lock()
+            .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+        if !db.resolve_approval(
+            &grant.approval_id,
+            ApprovalStatus::Pending,
+            ApprovalStatus::Approved,
+            "user",
+        )? || !db.resolve_approval(
+            &grant.approval_id,
+            ApprovalStatus::Approved,
+            ApprovalStatus::Consumed,
+            "user",
+        )? {
+            return Ok(ToolExecutionResponse::Result {
+                result: replay_denied(call.id, "approval replay 被阻断"),
+            });
+        }
+    }
+    state
+        .pending_tool_calls
+        .lock()
+        .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
+        .remove(&grant.approval_id);
+    execute_allowed(&state, call, risk, "confirm", Some(grant.approval_id)).await
+}
+
+#[tauri::command]
+pub fn audit_events_list(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<AuditEvent>, AppError> {
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .list_audit(limit.unwrap_or(100))
+}
+
+async fn execute_allowed(
+    state: &State<'_, AppState>,
+    call: ToolCall,
+    risk: policy::RiskAssessment,
+    policy_action: &str,
+    approval_id: Option<String>,
+) -> Result<ToolExecutionResponse, AppError> {
+    let connection_id = match state
+        .ssh
+        .active_connection_id(call.target.server_id())
+        .await
+    {
+        Some(value) => value,
+        None => {
+            let result = rejected_result(
+                &call,
+                "SSH_CONNECTION_NOT_FOUND",
+                "目标服务器未连接",
+                "failed",
+            );
+            append_tool_audit(state, &call, Some(&risk), policy_action, &result)?;
+            return Ok(ToolExecutionResponse::Result { result });
+        }
+    };
+    let audit_id = uuid::Uuid::new_v4().to_string();
+    let result = tools::execute(&state.ssh, &connection_id, &call, audit_id).await;
+    let mut event = audit_for(
+        &call,
+        Some(&risk),
+        policy_action,
+        &result.status,
+        approval_id,
+        serde_json::json!({"summary":result.summary,"durationMs":result.meta.duration_ms}),
+    );
+    event.connection_id = Some(connection_id);
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .append_audit(&event)?;
+    Ok(ToolExecutionResponse::Result { result })
+}
+
+fn profile_for(state: &State<'_, AppState>, server_id: &str) -> Result<ServerProfile, AppError> {
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .list_server_profiles()?
+        .into_iter()
+        .find(|profile| profile.id == server_id)
+        .ok_or_else(|| AppError::Validation("服务器配置不存在".into()))
+}
+fn rejected_result(call: &ToolCall, code: &str, message: &str, status: &str) -> ToolResult {
+    let now = Utc::now().to_rfc3339();
+    ToolResult {
+        call_id: call.id.clone(),
+        status: status.into(),
+        data: None,
+        summary: message.into(),
+        evidence: Vec::new(),
+        changed_resources: Vec::new(),
+        warnings: Vec::new(),
+        error: Some(crate::error::AppErrorDto {
+            code: code.into(),
+            message: message.into(),
+            retryable: false,
+            category: if code.starts_with("POLICY") {
+                "policy".into()
+            } else {
+                "tool".into()
+            },
+            details: Some(serde_json::json!({"reason":message})),
+        }),
+        meta: ToolResultMeta {
+            duration_ms: 0,
+            truncated: false,
+            started_at: now.clone(),
+            finished_at: now,
+            audit_id: uuid::Uuid::new_v4().to_string(),
+        },
+    }
+}
+fn replay_denied(call_id: String, message: &str) -> ToolResult {
+    let call = ToolCall {
+        id: call_id,
+        name: "approval.resolve".into(),
+        version: "1.0.0".into(),
+        input: serde_json::json!({}),
+        target: tools::ResourceTarget::Server {
+            server_id: "unknown".into(),
+        },
+        requested_at: Utc::now().to_rfc3339(),
+        conversation_id: None,
+        agent_run_id: None,
+    };
+    rejected_result(&call, "POLICY_DENIED", message, "denied")
+}
+fn append_tool_audit(
+    state: &State<'_, AppState>,
+    call: &ToolCall,
+    risk: Option<&policy::RiskAssessment>,
+    action: &str,
+    result: &ToolResult,
+) -> Result<(), AppError> {
+    let event = audit_for(
+        call,
+        risk,
+        action,
+        &result.status,
+        None,
+        serde_json::json!({"summary":result.summary}),
+    );
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .append_audit(&event)
+}
+fn audit_for(
+    call: &ToolCall,
+    risk: Option<&policy::RiskAssessment>,
+    action: &str,
+    outcome: &str,
+    approval_id: Option<String>,
+    details: serde_json::Value,
+) -> AuditEvent {
+    AuditEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        workspace_id: "default".into(),
+        actor: "user".into(),
+        server_id: Some(call.target.server_id().into()),
+        connection_id: None,
+        conversation_id: call.conversation_id.clone(),
+        agent_run_id: call.agent_run_id.clone(),
+        action: "tool.execute".into(),
+        tool_name: Some(call.name.clone()),
+        tool_version: Some(call.version.clone()),
+        tool_call_id: Some(call.id.clone()),
+        approval_id,
+        risk_level: risk.map(|v| v.level.as_str().into()),
+        policy_action: Some(action.into()),
+        outcome: outcome.into(),
+        arguments_digest: Some(tools::arguments_digest(call)),
+        sanitized_details: details.as_object().cloned().unwrap_or_default(),
+    }
 }
 
 #[tauri::command]
