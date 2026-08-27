@@ -1,0 +1,74 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 项目概览
+
+InfraDeck 是一个 AI-native Infrastructure Workspace（桌面 SSH 基础设施管理工具），当前处于 V0.1 的 M0「工程底座」阶段。技术栈：Tauri 2 + Rust 后端、React 18 + Vite + TypeScript 前端、SQLite（rusqlite bundled）、zod 契约校验、vitest/cargo 测试。
+
+已实现能力：IPC health check、Server Profile 的 SQLite 持久化（凭据只存 reference）、SSH 连接/Exec/PTY、Host Key 校验。未实现的规划模块（tools/policy/ai/audit/context）见 `doc/` 目录，属于后续里程碑。
+
+`doc/InfraDeck_开发实施规范_v0.1.md` 是唯一实施级规范，字段/命令/状态/错误码的变更必须先改文档并加 migration 或 contract version，禁止只改代码。文档优先级：实施规范 > 核心接口定义 > Tool 协议 > 架构设计 > PRD/任务清单。
+
+## 常用命令
+
+```bash
+pnpm install          # 安装依赖
+pnpm dev              # Vite 开发服务器（端口 1420，strictPort）
+pnpm tauri dev        # 启动桌面应用（需本机安装 Rust 与 Tauri 依赖）
+pnpm typecheck        # tsc --noEmit（前端类型检查）
+pnpm build            # tsc --noEmit && vite build
+pnpm test             # vitest run（前端/契约测试）
+```
+
+Rust 侧命令（CI 中的完整校验链）：
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check   # 格式检查
+cargo test --manifest-path src-tauri/Cargo.toml             # Rust 单元测试
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+```
+
+本地开发时，Vite 的 `pnpm dev` 单独跑前端；完整桌面应用必须 `pnpm tauri dev`（tauri.conf.json 的 `beforeDevCommand` 会自动拉起 Vite）。CI 在 windows-2022 和 macos-14 上跑上述全部校验（`.github/workflows/ci.yml`）。
+
+## 架构
+
+单仓库 Tauri 应用，前后端通过 Tauri IPC（`invoke`）通信。前端不直接访问数据库或 SSH，全部经由 Rust 侧命令。
+
+### Rust 后端（`src-tauri/src/`）
+
+- `main.rs`：注册全部 Tauri 命令；tracing 初始化，日志级别由 `RUST_LOG` 环境变量控制，默认 `infradeck=info`。
+- `app_state.rs`：`AppState` 聚合共享状态——`db: Mutex<Database>`、`credentials: Arc<dyn CredentialProvider>`、`ssh: SshManager<Box<dyn SshProvider>>`、`host_keys: Arc<HostKeyTrustStore>`，通过 `tauri::Builder::manage` 注入。
+- `commands/mod.rs`：所有 Tauri 命令的实现。命令有统一模式：锁定 `db` → 调用 repository/service → 返回 DTO 或 `AppError`。带 `#[instrument(skip(...))]` 追踪。
+- `models.rs`：`ServerProfile` / `ServerProfileInput` / `AuthRef`（tagged enum：password/privateKey/agent）/ `Environment` / `HealthCheckDto`，是 IPC 的 wire 契约（camelCase 序列化）。
+- `error.rs`：`AppError` 统一错误模型，序列化为 `AppErrorDto { code, message, retryable, category, details }`。前端按 `code`/`category` 分支处理（如 `SSH_HOST_KEY_REQUIRED`、`CREDENTIAL_NOT_FOUND`）。
+- `storage/mod.rs`：`Database`。迁移用 `include_str!("../../migrations/*.sql")` 内嵌并按版本顺序执行。Repository 方法直接写 SQL。
+- `credentials/mod.rs`：`CredentialProvider` trait + `PlatformCredentialProvider`（`keyring` crate，系统 Keychain/Secret Service）。`SecretValue` 不可序列化/克隆/Display，Debug 显示 `[REDACTED]`，Drop 时 zeroize。credential id 必须是 UUID v4。
+- `ssh/mod.rs`：`SshProvider` trait 抽象；`SshManager` 维护连接注册表与状态机（`can_transition`/`transition`，非法跳转会报 `InvalidTransition`）、并发 channel 上限 8；`MockSshProvider` 用于测试。定义 Exec/PTY 的 DTO 与请求参数。
+- `ssh/hostkey.rs`：纯逻辑的 host key 校验——`evaluate` 得出 `Unknown/Changed/Matched` 状态，`decision_allowed` 判定 TrustOnce/TrustAndSave/Reject 是否合法（Changed 不允许 TrustAndSave）。
+- `ssh/real.rs`：`RusshProvider`（russh crate）真实连接实现；`HostKeyTrustStore` 内存缓存已信任指纹；按平台实现 SSH agent 认证（macOS `SSH_AUTH_SOCK`，Windows named pipe）。
+- `config.rs` / `platform.rs`：配置占位结构与平台相关路径（`app_data_dir()` 返回 `<data_dir>/InfraDeck`）。
+
+### 前端（`src/`）
+
+- `main.tsx` → `app/App.tsx`：单页 UI（尚无 router），当前只有 Server Profile 表单 + 服务器列表 + Host Key 确认卡片。
+- `lib/tauri.ts`：`invoke` 的类型安全封装 `api.*`；`AppError` 类把后端错误规范化（非 AppErrorDto 的错误兜底为 `IPC_UNKNOWN_ERROR`）。
+- `types/contracts.ts`：TS 侧 wire 契约类型，必须与 Rust DTO 保持同步。
+- `types/schemas.ts`：zod 契约校验 schema（`serverProfileInputSchema`、`appErrorSchema`）。
+
+### 关键契约约束
+
+- **凭据绝不写入 SQLite**。`AuthRef::Password` 只存 `credentialId`，私钥只存 `keyPath`（可选 `passphraseCredentialId`）；密码/私钥通过 `credential_set` 写入系统凭据存储，`SecretValue` 只短暂存在于内存。
+- **契约三处同步**：Rust DTO（`models.rs`/commands）↔ TS 类型（`contracts.ts`）↔ zod schema（`schemas.ts`）必须一致。序列化统一 camelCase。
+- 时间戳一律 UTC RFC 3339 字符串；业务 ID 一律 UUID v4。
+- 跨平台认证：Windows 走 `\\.\pipe\openssh-ssh-agent`，macOS 走 `SSH_AUTH_SOCK`，其他平台返回 unsupported。
+
+## 测试
+
+- 前端契约测试：`pnpm test`（vitest），`src/types/schemas.test.ts` 校验 zod schema。
+- Rust 单元测试：`cargo test`。测试用 `include_str!("../../tests/contracts/*.json")` 加载 wire 契约 fixture 断言序列化字段（见 `models.rs`、`storage/mod.rs` 的 `#[cfg(test)]`），改字段时必须同步更新 `tests/contracts/` 下的 fixture。
+- `MockSshProvider` 是 SSH 逻辑的测试替身，新增 SSH 逻辑时应复用它而不是连真实服务器。
+
+## 数据与存储
+
+SQLite 文件位于系统应用数据目录的 `InfraDeck/infradeck.sqlite3`（`dirs::data_dir()`）。已有表：`servers`、`known_hosts`、`app_settings`，以及预留的 `workspaces`/`audit_events`/`ai_conversations`。新增 migration 文件时同步在 `storage/mod.rs` 的 `migrate()` 数组里注册。
