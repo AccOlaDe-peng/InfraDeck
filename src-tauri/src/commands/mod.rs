@@ -80,6 +80,39 @@ pub async fn server_connect(
 
 #[tauri::command]
 #[instrument(skip(state), target = "infradeck::ssh")]
+pub async fn server_reconnect(
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<ConnectionDto, AppError> {
+    let profile = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+        db.list_server_profiles()?
+            .into_iter()
+            .find(|item| item.id == server_id)
+            .ok_or_else(|| AppError::Validation("服务器配置不存在".into()))?
+    };
+    let credential = match &profile.auth {
+        crate::models::AuthRef::Password { credential_id } => {
+            Some(state.credentials.get(credential_id)?)
+        }
+        crate::models::AuthRef::PrivateKey {
+            passphrase_credential_id: Some(credential_id),
+            ..
+        } => Some(state.credentials.get(credential_id)?),
+        _ => None,
+    };
+    state
+        .ssh
+        .reconnect(&profile, credential.as_ref())
+        .await
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::ssh")]
 pub async fn connection_disconnect(
     state: State<'_, AppState>,
     connection_id: String,

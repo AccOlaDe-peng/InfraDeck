@@ -24,6 +24,7 @@ fn main() {
             commands::server_profiles_list,
             commands::server_profile_save,
             commands::server_connect,
+            commands::server_reconnect,
             commands::connection_disconnect,
             commands::terminal_open,
             commands::connection_exec,

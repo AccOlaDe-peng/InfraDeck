@@ -354,6 +354,26 @@ impl<P: SshProvider> SshManager<P> {
         Ok(dto)
     }
 
+    pub async fn reconnect(
+        &self,
+        profile: &ServerProfile,
+        credential: Option<&SecretValue>,
+    ) -> Result<ConnectionDto, SshError> {
+        let active_id = {
+            let registry = self.registry.lock().await;
+            registry
+                .iter()
+                .find(|(_, (item, _))| {
+                    item.server_id == profile.id && item.state == ConnectionState::Connected
+                })
+                .map(|(id, _)| id.clone())
+        };
+        if let Some(id) = active_id {
+            self.disconnect(&id).await?;
+        }
+        self.connect(profile, credential).await
+    }
+
     pub async fn open_pty(
         &self,
         connection_id: &str,
@@ -508,6 +528,29 @@ mod tests {
         let first = manager.connect(&profile, None).await.expect("connect");
         let second = manager.connect(&profile, None).await.expect("deduplicate");
         assert_eq!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn explicit_reconnect_creates_a_new_connection() {
+        let profile = ServerProfile {
+            id: "server-reconnect".into(),
+            name: "test".into(),
+            host: "localhost".into(),
+            port: 22,
+            username: "dev".into(),
+            auth: crate::models::AuthRef::Agent,
+            environment: crate::models::Environment::Dev,
+            tags: vec![],
+            connect_timeout_ms: 15_000,
+            keep_alive_interval_sec: 30,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let manager = SshManager::new(MockSshProvider);
+        let first = manager.connect(&profile, None).await.expect("connect");
+        let second = manager.reconnect(&profile, None).await.expect("reconnect");
+        assert_ne!(first.id, second.id);
+        assert_eq!(second.state, ConnectionState::Connected);
     }
 
     #[tokio::test]

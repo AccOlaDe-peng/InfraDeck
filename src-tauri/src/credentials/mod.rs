@@ -138,4 +138,26 @@ mod tests {
         assert!(is_missing_entry("The item could not be found"));
         assert!(!is_missing_entry("User denied access to secure storage"));
     }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn platform_credential_round_trip() {
+        let provider = PlatformCredentialProvider;
+        let id = uuid::Uuid::new_v4().to_string();
+        let expected = format!("infradeck-test-{}", uuid::Uuid::new_v4());
+
+        provider
+            .set(
+                &id,
+                SecretValue::new(expected.clone()).expect("test secret"),
+            )
+            .expect("store platform credential");
+        assert!(provider.exists(&id).expect("credential exists"));
+
+        let actual = provider.get(&id).expect("read platform credential");
+        assert_eq!(actual.expose(), expected);
+
+        provider.delete(&id).expect("delete platform credential");
+        assert!(!provider.exists(&id).expect("credential was deleted"));
+    }
 }

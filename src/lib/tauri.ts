@@ -43,6 +43,7 @@ export const api = {
   credentialExists: (credentialId: string) =>
     call<boolean>('credential_exists', { credentialId }),
   connect: (serverId: string) => call<ConnectionDto>('server_connect', { serverId }),
+  reconnect: (serverId: string) => call<ConnectionDto>('server_reconnect', { serverId }),
   disconnect: (connectionId: string) => call<ConnectionDto>('connection_disconnect', { connectionId }),
   openTerminal: (connectionId: string, options: PtyOptions) => call<TerminalSessionDto>('terminal_open', { connectionId, options }),
   exec: (connectionId: string, request: ExecRequest) => call<ExecResult>('connection_exec', { connectionId, request }),

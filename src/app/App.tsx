@@ -180,6 +180,21 @@ export default function App() {
     finally { setConnectionBusy(undefined); }
   };
 
+  const reconnect = async (item: ServerProfile) => {
+    setConnectionBusy(item.id);
+    setError(undefined);
+    try {
+      const connection = await api.reconnect(item.id);
+      setConnections((current) => ({ ...current, [item.id]: connection }));
+      setOutputs((current) => { const next = { ...current }; delete next[item.id]; return next; });
+      setNotice(`已重新连接「${item.name}」。`);
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setConnectionBusy(undefined);
+    }
+  };
+
   const runCheck = async (item: ServerProfile) => {
     const connection = connections[item.id];
     if (!connection) return;
@@ -246,7 +261,7 @@ export default function App() {
 
         <section className="panel profiles-panel">
           <div className="panel-heading"><div><p className="eyebrow">PERSISTED PROFILES</p><h3>服务器列表</h3></div><span className="count">{profiles.length}</span></div>
-          {profiles.length === 0 ? <div className="empty-state"><span>◎</span><p>还没有服务器配置</p><small>保存第一个 Profile，验证 SQLite 与 IPC 链路。</small></div> : <div className="profile-list">{profiles.map((item) => { const connection = connections[item.id]; const result = outputs[item.id]; const busyConnection = connectionBusy === item.id; const authLabel = item.auth.kind === 'agent' ? 'Agent' : item.auth.kind === 'password' ? '密码' : '私钥'; return <article className="profile-item" key={item.id}><div className="server-icon">⌁</div><div className="profile-main"><strong>{item.name}</strong><span>{item.username}@{item.host}:{item.port} · {authLabel}</span>{connection && <small className={`connection-state ${connection.state}`}>{connection.state === 'connected' ? '已连接' : connection.state}</small>}{result && <code className="exec-output">{result.stdout || result.stderr}</code>}</div><span className={`environment ${item.environment}`}>{item.environment}</span><div className="profile-actions"><button className="small-button" onClick={() => editProfile(item)}>编辑</button>{connection?.state === 'connected' ? <><button className="small-button" disabled={busyConnection} onClick={() => void runCheck(item)}>测试命令</button><button className="small-button danger" disabled={busyConnection} onClick={() => void disconnect(item)}>断开</button></> : <button className="small-button connect" disabled={busyConnection} onClick={() => void connect(item)}>{busyConnection ? '连接中…' : '连接'}</button>}</div></article>; })}</div>}
+          {profiles.length === 0 ? <div className="empty-state"><span>◎</span><p>还没有服务器配置</p><small>保存第一个 Profile，验证 SQLite 与 IPC 链路。</small></div> : <div className="profile-list">{profiles.map((item) => { const connection = connections[item.id]; const result = outputs[item.id]; const busyConnection = connectionBusy === item.id; const authLabel = item.auth.kind === 'agent' ? 'Agent' : item.auth.kind === 'password' ? '密码' : '私钥'; return <article className="profile-item" key={item.id}><div className="server-icon">⌁</div><div className="profile-main"><strong>{item.name}</strong><span>{item.username}@{item.host}:{item.port} · {authLabel}</span>{connection && <small className={`connection-state ${connection.state}`}>{connection.state === 'connected' ? '已连接' : connection.state}</small>}{result && <code className="exec-output">{result.stdout || result.stderr}</code>}</div><span className={`environment ${item.environment}`}>{item.environment}</span><div className="profile-actions"><button className="small-button" onClick={() => editProfile(item)}>编辑</button>{connection?.state === 'connected' ? <><button className="small-button" disabled={busyConnection} onClick={() => void runCheck(item)}>测试命令</button><button className="small-button" disabled={busyConnection} onClick={() => void reconnect(item)}>重连</button><button className="small-button danger" disabled={busyConnection} onClick={() => void disconnect(item)}>断开</button></> : <button className="small-button connect" disabled={busyConnection} onClick={() => void connect(item)}>{busyConnection ? '连接中…' : '连接'}</button>}</div></article>; })}</div>}
         </section>
       </section>
 
