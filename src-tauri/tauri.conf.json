@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "InfraDeck",
+  "version": "0.1.0",
+  "identifier": "com.infradeck.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "InfraDeck", "width": 1180, "height": 820, "minWidth": 720, "minHeight": 620 }],
+    "security": { "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'" }
+  },
+  "bundle": { "active": true, "targets": "all" }
+}

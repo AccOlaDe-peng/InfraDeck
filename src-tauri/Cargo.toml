@@ -1,0 +1,25 @@
+[package]
+name = "infradeck"
+version = "0.1.0"
+description = "AI-native infrastructure workspace"
+authors = ["InfraDeck"]
+edition = "2021"
+
+[[bin]]
+name = "infradeck"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde", "clock"] }
+dirs = "5"
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["serde", "v4"] }
