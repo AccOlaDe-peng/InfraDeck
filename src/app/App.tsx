@@ -1,8 +1,8 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, AppError } from '../lib/tauri';
-import type { Environment, HealthCheckDto, ServerProfile } from '../types/contracts';
+import type { Environment, HealthCheckDto, ServerProfile, ServerProfileInput } from '../types/contracts';
 
-const emptyProfile = (): ServerProfile => ({
+const emptyProfile = (): ServerProfileInput => ({
   id: crypto.randomUUID(),
   name: '',
   host: '',
@@ -11,6 +11,8 @@ const emptyProfile = (): ServerProfile => ({
   auth: { kind: 'agent' },
   environment: 'unknown',
   tags: [],
+  connectTimeoutMs: 15000,
+  keepAliveIntervalSec: 30,
 });
 
 function errorMessage(error: unknown): string {
@@ -20,7 +22,7 @@ function errorMessage(error: unknown): string {
 export default function App() {
   const [health, setHealth] = useState<HealthCheckDto>();
   const [profiles, setProfiles] = useState<ServerProfile[]>([]);
-  const [profile, setProfile] = useState<ServerProfile>(emptyProfile);
+  const [profile, setProfile] = useState<ServerProfileInput>(emptyProfile);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -64,7 +66,7 @@ export default function App() {
     }
   };
 
-  const update = <K extends keyof ServerProfile>(key: K, value: ServerProfile[K]) =>
+  const update = <K extends keyof ServerProfileInput>(key: K, value: ServerProfileInput[K]) =>
     setProfile((current) => ({ ...current, [key]: value }));
 
   return (

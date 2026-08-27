@@ -16,13 +16,43 @@ export interface ServerProfile {
   auth: AuthRef;
   environment: Environment;
   tags: string[];
+  connectTimeoutMs: number;
+  keepAliveIntervalSec: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ServerProfileInput {
+  id?: ServerId;
+  name: string;
+  host: string;
+  port?: number;
+  username: string;
+  auth: AuthRef;
+  environment?: Environment;
+  tags?: string[];
+  connectTimeoutMs?: number;
+  keepAliveIntervalSec?: number;
 }
 
 export interface HealthCheckDto {
+  schemaVersion: number;
   status: 'ok';
   appVersion: string;
   storage: 'ready';
   timestamp: string;
+}
+
+export type ConnectionState = 'connecting' | 'waitingHostKey' | 'authenticating' | 'connected' | 'disconnecting' | 'disconnected' | 'failed';
+export interface ConnectionDto {
+  id: string;
+  serverId: ServerId;
+  state: ConnectionState;
+  remoteAddress?: string;
+  serverVersion?: string;
+  authenticatedBy?: 'password' | 'privateKey' | 'agent';
+  connectedAt?: string;
+  disconnectedAt?: string;
 }
 
 export type AppErrorCategory =
@@ -32,6 +62,7 @@ export type AppErrorCategory =
   | 'ai'
   | 'storage'
   | 'validation'
+  | 'credential'
   | 'unknown';
 
 export interface AppErrorDto {

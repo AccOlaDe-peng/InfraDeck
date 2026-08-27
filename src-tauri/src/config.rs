@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub version: u32,
@@ -13,11 +14,16 @@ pub struct AppSettings {
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { version: 1, permission_mode: PermissionMode::ConfirmChanges, telemetry_enabled: false }
+        Self {
+            version: 1,
+            permission_mode: PermissionMode::ConfirmChanges,
+            telemetry_enabled: false,
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSettings {
     pub workspace_id: String,
@@ -26,6 +32,7 @@ pub struct WorkspaceSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionMode {
     AskOnly,
@@ -36,6 +43,7 @@ pub enum PermissionMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretReference {
     pub credential_id: String,
@@ -43,6 +51,7 @@ pub struct SecretReference {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 #[serde(rename_all = "kebab-case")]
 pub enum SecretProvider {
     OsKeychain,

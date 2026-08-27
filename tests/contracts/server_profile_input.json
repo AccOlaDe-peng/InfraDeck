@@ -1,0 +1,11 @@
+{
+  "name": "Development API",
+  "host": "localhost",
+  "port": 22,
+  "username": "dev",
+  "auth": { "kind": "agent" },
+  "environment": "dev",
+  "tags": ["local"],
+  "connectTimeoutMs": 15000,
+  "keepAliveIntervalSec": 30
+}

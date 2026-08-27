@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppErrorDto, HealthCheckDto, ServerProfile } from '../types/contracts';
+import type { AppErrorDto, ConnectionDto, HealthCheckDto, ServerProfile, ServerProfileInput } from '../types/contracts';
 
 export class AppError extends Error {
   readonly dto: AppErrorDto;
@@ -34,6 +34,14 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export const api = {
   healthCheck: () => call<HealthCheckDto>('health_check'),
   listServerProfiles: () => call<ServerProfile[]>('server_profiles_list'),
-  saveServerProfile: (profile: ServerProfile) =>
-    call<ServerProfile>('server_profile_save', { profile }),
+  saveServerProfile: (profile: ServerProfileInput) =>
+    call<ServerProfile>('server_profile_save', { input: profile }),
+  setCredential: (credentialId: string | undefined, secret: string) =>
+    call<{ credentialId: string; exists: boolean }>('credential_set', { input: { credentialId, secret } }),
+  deleteCredential: (credentialId: string) =>
+    call<void>('credential_delete', { credentialId }),
+  credentialExists: (credentialId: string) =>
+    call<boolean>('credential_exists', { credentialId }),
+  connect: (serverId: string) => call<ConnectionDto>('server_connect', { serverId }),
+  disconnect: (connectionId: string) => call<ConnectionDto>('connection_disconnect', { connectionId }),
 };

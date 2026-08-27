@@ -1,0 +1,7 @@
+{
+  "code": "CREDENTIAL_PROVIDER_ERROR",
+  "message": "credential provider error",
+  "retryable": false,
+  "category": "credential",
+  "details": {}
+}
