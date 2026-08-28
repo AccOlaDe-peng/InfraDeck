@@ -199,7 +199,7 @@ pub fn evaluate(
     if definition.metadata.mutation {
         return PolicyDecision::Confirm(risk);
     }
-    match mode {
+    let decision = match mode {
         PermissionMode::ReadOnly => PolicyDecision::Deny(
             RiskAssessment {
                 level: RiskLevel::High,
@@ -226,7 +226,57 @@ pub fn evaluate(
                 PolicyDecision::Allow(risk)
             }
         }
+    };
+    escalate_secret_read(call, decision)
+}
+
+/// Reading a sensitive path can only tighten the decision (Allow -> Confirm);
+/// it never loosens a Deny or downgrades a Confirm.
+fn escalate_secret_read(call: &ToolCall, decision: PolicyDecision) -> PolicyDecision {
+    let hit = match secret_path_hit(call) {
+        Some(rule) => rule,
+        None => return decision,
+    };
+    if let PolicyDecision::Allow(risk) = decision {
+        let mut reasons = risk.reasons.clone();
+        reasons.push("读取路径命中敏感文件规则，需确认".into());
+        PolicyDecision::Confirm(RiskAssessment {
+            level: RiskLevel::High,
+            score: risk.score.max(70),
+            reasons,
+            matched_rules: vec![hit.into()],
+        })
+    } else {
+        decision
     }
+}
+
+fn secret_path_hit(call: &ToolCall) -> Option<&'static str> {
+    if call.name != "fs.read" {
+        return None;
+    }
+    let path = call.input.get("path").and_then(Value::as_str)?;
+    is_secret_path(path).then_some("POLICY_SECRET_PATH")
+}
+
+pub(crate) fn is_secret_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let segments: Vec<&str> = lower.split('/').collect();
+    if segments
+        .iter()
+        .any(|seg| matches!(*seg, ".ssh" | ".aws" | ".gnupg"))
+    {
+        return true;
+    }
+    if matches!(lower.as_str(), "/etc/shadow" | "/etc/gshadow") {
+        return true;
+    }
+    let basename = segments.last().copied().unwrap_or("");
+    matches!(
+        basename,
+        ".env" | "id_rsa" | "id_ed25519" | "id_ecdsa" | "authorized_keys"
+    ) || basename.ends_with(".pem")
+        || basename.ends_with(".key")
 }
 
 fn hard_block(call: &ToolCall) -> Option<&'static str> {
@@ -363,6 +413,24 @@ pub fn validate_approval(
 mod tests {
     use super::*;
     use crate::tools::{ResourceTarget, ToolMetadata};
+
+    #[test]
+    fn secret_path_detection() {
+        assert!(is_secret_path("/home/dev/.ssh/id_rsa"));
+        assert!(is_secret_path("/root/.ssh/config"));
+        assert!(is_secret_path("/home/dev/.aws/credentials"));
+        assert!(is_secret_path("/root/.gnupg/pubring.kbx"));
+        assert!(is_secret_path("/etc/shadow"));
+        assert!(is_secret_path("/srv/app/.env"));
+        assert!(is_secret_path("/etc/ssl/private/server.pem"));
+        assert!(is_secret_path("/keys/host.key"));
+        assert!(!is_secret_path("/var/log/syslog"));
+        assert!(!is_secret_path("/srv/app/config.yaml"));
+        assert!(
+            !is_secret_path("/home/dev/.ssh_backup/x"),
+            "prefix lookalikes must not match"
+        );
+    }
     fn definition(mutation: bool) -> ToolDefinition {
         ToolDefinition {
             name: "service.restart".into(),

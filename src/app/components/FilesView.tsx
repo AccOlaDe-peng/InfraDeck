@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { api, AppError } from '../../lib/tauri';
+import { isSecretPath } from '../../lib/secretPath';
 import type { ConnectionDto, FileEntry, ServerProfile, TransferJob } from '../../types/contracts';
 
 interface Props {
   server: ServerProfile;
   connection: ConnectionDto;
+  /** Other currently-connected servers, available as ss2s copy destinations. */
+  peers: Array<{ server: ServerProfile; connection: ConnectionDto }>;
   onNotify: (message: string) => void;
   onError: (message: string) => void;
 }
@@ -32,7 +35,7 @@ function breadcrumbSegments(path: string): Array<{ label: string; path: string }
 }
 
 /** Files view: remote browser + transfer queue. All writes are explicit user actions. */
-export default function FilesView({ server, connection, onNotify, onError }: Props) {
+export default function FilesView({ server, connection, peers, onNotify, onError }: Props) {
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -65,6 +68,12 @@ export default function FilesView({ server, connection, onNotify, onError }: Pro
         setTransfers((current) => current.map((job) =>
           job.transferId === event.payload.transferId ? event.payload : job));
       }));
+      unlisteners.push(await listen<{ transferId: string; state: TransferJob['state'] }>('transfer.state', (event) => {
+        setTransfers((current) => current.map((job) =>
+          job.transferId === event.payload.transferId
+            ? { ...job, state: event.payload.state, speedBytesPerSec: event.payload.state === 'paused' ? 0 : job.speedBytesPerSec }
+            : job));
+      }));
     })();
     return () => unlisteners.forEach((fn) => fn());
   }, []);
@@ -83,6 +92,59 @@ export default function FilesView({ server, connection, onNotify, onError }: Pro
       });
       setTransfers((current) => [...current, job]);
       onNotify('传输已开始。');
+    } catch (cause) {
+      onError(cause instanceof AppError ? `${cause.dto.code}: ${cause.message}` : String(cause));
+    }
+  };
+
+  const retryTransfer = async (job: TransferJob) => {
+    if (job.kind === 'serverToServer') return;
+    try {
+      const retried = await api.fsTransferStart({
+        kind: job.kind,
+        serverId: job.serverId,
+        connectionId: job.connectionId,
+        remotePath: job.remotePath,
+        localPath: job.localPath,
+        overwrite: true,
+      });
+      setTransfers((current) => current.map((item) =>
+        item.transferId === job.transferId ? retried : item));
+      onNotify('重试已开始。');
+    } catch (cause) {
+      onError(cause instanceof AppError ? `${cause.dto.code}: ${cause.message}` : String(cause));
+    }
+  };
+
+  /** Server-to-server copy of a remote file to another connected server. */
+  const copyToServer = async (entry: FileEntry) => {
+    if (peers.length === 0) {
+      onError('没有其他已连接的服务器可作为复制目标。');
+      return;
+    }
+    let peer = peers[0];
+    if (peers.length > 1) {
+      const menu = peers.map((item, index) => `${index + 1}. ${item.server.name}`).join('\n');
+      const picked = Number(window.prompt(`选择目标服务器（输入序号）：\n${menu}`));
+      if (!Number.isInteger(picked) || picked < 1 || picked > peers.length) return;
+      peer = peers[picked - 1];
+    }
+    const destPath = window.prompt(`复制到 ${peer.server.name} 的目标路径`, entry.path)?.trim();
+    if (!destPath) return;
+    if ((isSecretPath(entry.path) || isSecretPath(destPath))
+      && !window.confirm('路径命中敏感文件规则（POLICY_SECRET_PATH），确认继续复制？')) return;
+    try {
+      const job = await api.ss2sTransferStart({
+        sourceServerId: server.id,
+        sourceConnectionId: connection.id,
+        sourcePath: entry.path,
+        destServerId: peer.server.id,
+        destConnectionId: peer.connection.id,
+        destPath,
+        overwrite: window.confirm('目标已存在时允许覆盖？'),
+      });
+      setTransfers((current) => [...current, job]);
+      onNotify('跨服务器传输已开始。');
     } catch (cause) {
       onError(cause instanceof AppError ? `${cause.dto.code}: ${cause.message}` : String(cause));
     }
@@ -143,6 +205,7 @@ export default function FilesView({ server, connection, onNotify, onError }: Pro
             <span className="file-mode">{entry.mode}</span>
             <span className="file-actions">
               {entry.kind === 'file' && <button className="tiny-button" onClick={() => void startTransfer('download', entry)}>下载</button>}
+              {entry.kind === 'file' && peers.length > 0 && <button className="tiny-button" onClick={() => void copyToServer(entry)}>跨服务器复制</button>}
               <button className="tiny-button" onClick={() => void rename(entry)}>重命名</button>
               <button className="tiny-button danger" onClick={() => void remove(entry)}>删除</button>
             </span>
@@ -153,14 +216,25 @@ export default function FilesView({ server, connection, onNotify, onError }: Pro
         <div className="transfer-bar">
           {transfers.map((job) => (
             <div key={job.transferId} className={`transfer-row ${job.state}`}>
-              <span>{job.kind === 'upload' ? '↑' : '↓'} {job.remotePath}</span>
+              <span>{job.kind === 'upload' ? '↑' : job.kind === 'download' ? '↓' : '⇄'} {job.kind === 'serverToServer' ? `${job.sourcePath} → ${job.remotePath}` : job.remotePath}</span>
               <progress max={job.totalBytes || 1} value={job.transferredBytes} />
               <span className="transfer-meta">
                 {job.state === 'running'
                   ? `${((job.transferredBytes / (job.totalBytes || 1)) * 100).toFixed(0)}% · ${formatBytes(job.speedBytesPerSec ?? 0)}`
-                  : job.state}
+                  : job.state === 'paused'
+                    ? `已暂停 ${((job.transferredBytes / (job.totalBytes || 1)) * 100).toFixed(0)}%`
+                    : job.state}
               </span>
-              {job.state === 'running'
+              {job.state === 'running' && (
+                <button className="tiny-button" onClick={() => void api.fsTransferPause(job.transferId)}>暂停</button>
+              )}
+              {job.state === 'paused' && (
+                <button className="tiny-button" onClick={() => void api.fsTransferResume(job.transferId)}>继续</button>
+              )}
+              {job.state === 'failed' && job.kind !== 'serverToServer' && (
+                <button className="tiny-button" onClick={() => void retryTransfer(job)}>重试</button>
+              )}
+              {job.state === 'running' || job.state === 'paused'
                 ? <button className="tiny-button danger" onClick={() => void api.fsTransferCancel(job.transferId)}>取消</button>
                 : <button className="tiny-button" onClick={() => setTransfers((current) => current.filter((item) => item.transferId !== job.transferId))}>清除</button>}
             </div>

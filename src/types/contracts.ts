@@ -98,10 +98,11 @@ export interface TerminalReadDto { dataBase64: string; closed: boolean }
 
 export type FileKind = 'file' | 'directory' | 'symlink' | 'other';
 export interface FileEntry { name: string; path: string; kind: FileKind; size: number; mode: string; ownerId?: number; groupId?: number; modifiedAt?: string; symlinkTarget?: string; }
-export type TransferKind = 'upload' | 'download';
+export type TransferKind = 'upload' | 'download' | 'serverToServer';
 export interface TransferRequest { kind: TransferKind; serverId: ServerId; connectionId: string; remotePath: string; localPath: string; overwrite?: boolean; }
-export type TransferState = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
-export interface TransferJob { transferId: string; kind: TransferKind; serverId: ServerId; connectionId: string; remotePath: string; localPath: string; totalBytes: number; transferredBytes: number; state: TransferState; speedBytesPerSec?: number; error?: AppErrorDto; startedAt?: string; finishedAt?: string; }
+export type TransferState = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export interface TransferJob { transferId: string; kind: TransferKind; serverId: ServerId; connectionId: string; remotePath: string; localPath: string; totalBytes: number; transferredBytes: number; state: TransferState; speedBytesPerSec?: number; error?: AppErrorDto; startedAt?: string; finishedAt?: string; sourceServerId?: string; sourceConnectionId?: string; sourcePath?: string; }
+export interface Ss2sTransferRequest { sourceServerId: ServerId; sourceConnectionId: string; sourcePath: string; destServerId: ServerId; destConnectionId: string; destPath: string; overwrite: boolean; }
 
 export type PermissionMode = 'askOnly' | 'readOnly' | 'confirmChanges' | 'advanced' | 'restricted';
 export interface AppSettings { version: number; permissionMode: PermissionMode; telemetryEnabled: boolean; conversationPersistence: boolean }
@@ -145,7 +146,7 @@ export interface AppErrorDto {
 
 export interface ToolMetadata { mutation: boolean; riskHint: 'safe' | 'caution' | 'high'; requiresPrivilege: boolean; timeoutMs: number; supportsBatch: boolean; capabilities: string[]; }
 export interface ToolDefinition { name: string; version: string; title: string; description: string; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown>; metadata: ToolMetadata; }
-export type ResourceTarget = { kind: 'server'; serverId: ServerId } | { kind: 'service'; serverId: ServerId; service: string } | { kind: 'process'; serverId: ServerId; pid: number } | { kind: 'container'; serverId: ServerId; containerId: string };
+export type ResourceTarget = { kind: 'server'; serverId: ServerId } | { kind: 'service'; serverId: ServerId; service: string } | { kind: 'process'; serverId: ServerId; pid: number } | { kind: 'container'; serverId: ServerId; containerId: string } | { kind: 'path'; serverId: ServerId; path: string };
 export interface ToolCall { id: string; name: string; version: string; input: Record<string, unknown>; target: ResourceTarget; requestedAt: string; conversationId?: string; agentRunId?: string; }
 export interface RiskAssessment { level: 'safe' | 'caution' | 'high' | 'blocked'; score: number; reasons: string[]; matchedRules: string[]; }
 export interface ApprovalRequest { approvalId: string; toolCallId: string; requestHash: string; risk: RiskAssessment; summary: string; targetLabel: string; impact: string[]; proposedChange?: { kind: 'action' | 'diff'; summary: string; before?: string; after?: string; verificationSteps: string[] }; expiresAt: string; requiredConfirmation: 'button' | 'typeTarget'; }

@@ -65,6 +65,25 @@ export const transferRequestSchema = z.object({
   overwrite: z.boolean().optional(),
 });
 
+/**
+ * Aligned with the Rust `Ss2sTransferRequest` (commands/fs.rs). Same-node
+ * rejection and dest-exists checks live on the Rust side; zod only checks
+ * shape. Both paths must be absolute remote paths.
+ */
+export const ss2sTransferRequestSchema = z
+  .object({
+    sourceServerId: z.string().min(1),
+    sourceConnectionId: z.string().min(1),
+    sourcePath: z.string().startsWith('/', 'sourcePath must be absolute').max(4096),
+    destServerId: z.string().min(1),
+    destConnectionId: z.string().min(1),
+    destPath: z.string().startsWith('/', 'destPath must be absolute').max(4096),
+    overwrite: z.boolean(),
+  })
+  .refine((request) => request.sourceConnectionId !== request.destConnectionId, {
+    message: 'source and dest connections must differ',
+  });
+
 export const aiProviderSettingsInputSchema = z.object({
   providerKind: z.literal('openaiCompatible').optional(),
   baseUrl: z.string().trim().regex(/^https?:\/\//, 'baseUrl must start with http:// or https://'),

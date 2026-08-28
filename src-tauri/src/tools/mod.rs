@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+use crate::fs::{FileKind, DOWNLOAD_CHUNK_LEN};
 use crate::ssh::{ExecRequest, SshManager, SshProvider};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +66,10 @@ pub enum ResourceTarget {
         server_id: String,
         container_id: String,
     },
+    Path {
+        server_id: String,
+        path: String,
+    },
 }
 
 impl ResourceTarget {
@@ -73,7 +78,8 @@ impl ResourceTarget {
             Self::Server { server_id }
             | Self::Service { server_id, .. }
             | Self::Process { server_id, .. }
-            | Self::Container { server_id, .. } => server_id,
+            | Self::Container { server_id, .. }
+            | Self::Path { server_id, .. } => server_id,
         }
     }
     pub fn label(&self) -> String {
@@ -85,6 +91,7 @@ impl ResourceTarget {
                 server_id,
                 container_id,
             } => format!("{server_id}/container:{container_id}"),
+            Self::Path { server_id, path } => format!("{server_id}/path:{path}"),
         }
     }
 }
@@ -341,6 +348,72 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 &["container", "command", "timeoutMs"],
             ),
         ),
+        definition(
+            "fs.list",
+            "List a remote directory",
+            false,
+            "safe",
+            15_000,
+            object_schema(
+                serde_json::json!({"path":{"type":"string","minLength":1,"maxLength":4096}}),
+                &[],
+            ),
+        ),
+        definition(
+            "fs.stat",
+            "Stat a remote file",
+            false,
+            "safe",
+            10_000,
+            object_schema(
+                serde_json::json!({"path":{"type":"string","minLength":1,"maxLength":4096}}),
+                &["path"],
+            ),
+        ),
+        definition(
+            "fs.read",
+            "Read a remote text file (bounded)",
+            false,
+            "safe",
+            30_000,
+            object_schema(
+                serde_json::json!({"path":{"type":"string","minLength":1,"maxLength":4096},"maxBytes":{"type":"integer","minimum":1,"maximum":2097152}}),
+                &["path"],
+            ),
+        ),
+        definition(
+            "fs.mkdir",
+            "Create a remote directory",
+            true,
+            "caution",
+            15_000,
+            object_schema(
+                serde_json::json!({"path":{"type":"string","minLength":1,"maxLength":4096}}),
+                &["path"],
+            ),
+        ),
+        definition(
+            "fs.rename",
+            "Rename or move a remote file",
+            true,
+            "caution",
+            15_000,
+            object_schema(
+                serde_json::json!({"from":{"type":"string","minLength":1,"maxLength":4096},"to":{"type":"string","minLength":1,"maxLength":4096}}),
+                &["from", "to"],
+            ),
+        ),
+        definition(
+            "fs.delete",
+            "Delete a remote file or directory",
+            true,
+            "high",
+            15_000,
+            object_schema(
+                serde_json::json!({"path":{"type":"string","minLength":1,"maxLength":4096},"recursive":{"type":"boolean"}}),
+                &["path"],
+            ),
+        ),
     ]
 }
 
@@ -501,6 +574,47 @@ fn validate_specific(call: &ToolCall) -> Result<(), String> {
                 }
             }
         }
+        "fs.rename" => {
+            let from = input
+                .get("from")
+                .and_then(Value::as_str)
+                .ok_or("from is required")?;
+            let to = input
+                .get("to")
+                .and_then(Value::as_str)
+                .ok_or("to is required")?;
+            crate::fs::validate_remote_path(from).map_err(|_| "from path is invalid")?;
+            crate::fs::validate_remote_path(to).map_err(|_| "to path is invalid")?;
+            if !matches!(&call.target, ResourceTarget::Path { path: target, .. } if target==from) {
+                return Err("target path mismatch".into());
+            }
+        }
+        "fs.list" => {
+            if let Some(path) = input.get("path").and_then(Value::as_str) {
+                crate::fs::validate_remote_path(path).map_err(|_| "path is invalid")?;
+                if !matches!(&call.target, ResourceTarget::Path { path: target, .. } if target==path)
+                {
+                    return Err("target path mismatch".into());
+                }
+            }
+        }
+        "fs.stat" | "fs.read" | "fs.mkdir" | "fs.delete" => {
+            let path = input
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("path is required")?;
+            crate::fs::validate_remote_path(path).map_err(|_| "path is invalid")?;
+            if !matches!(&call.target, ResourceTarget::Path { path: target, .. } if target==path) {
+                return Err("target path mismatch".into());
+            }
+            if call.name == "fs.read" {
+                if let Some(max) = input.get("maxBytes").and_then(Value::as_i64) {
+                    if !(1..=2_097_152).contains(&max) {
+                        return Err("maxBytes out of range".into());
+                    }
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -556,6 +670,11 @@ pub async fn execute<P: SshProvider>(
             )
         }
     };
+    // fs.* tools run through the SFTP provider directly (no shell template),
+    // so their whole pipeline is handled separately.
+    if call.name.starts_with("fs.") {
+        return execute_fs(manager, connection_id, call, audit_id, started_at, timer).await;
+    }
     let request = match build_request(call, definition.metadata.timeout_ms) {
         Ok(value) => value,
         Err(message) => {
@@ -656,6 +775,307 @@ pub async fn execute<P: SshProvider>(
             audit_id,
         },
     }
+}
+
+type FsOutcome = (String, Value, Option<String>, Option<String>, bool);
+const FS_READ_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const AI_READ_BUDGET_BYTES: usize = 64 * 1024;
+
+/// fs.* tools run against the SFTP provider directly (no shell template).
+/// Output crossing this boundary is untrusted data: `fs.read` content is
+/// redacted and capped at the AI budget before it reaches the model.
+async fn execute_fs<P: SshProvider>(
+    manager: &SshManager<P>,
+    connection_id: &str,
+    call: &ToolCall,
+    audit_id: String,
+    started: chrono::DateTime<Utc>,
+    timer: Instant,
+) -> ToolResult {
+    let outcome = run_fs_tool(
+        manager,
+        connection_id,
+        call,
+        audit_id.clone(),
+        started,
+        timer,
+    )
+    .await;
+    let mutation = matches!(call.name.as_str(), "fs.mkdir" | "fs.rename" | "fs.delete");
+    match outcome {
+        Ok(value) => fs_result(call, audit_id, started, timer, value, mutation),
+        Err(result) => *result,
+    }
+}
+
+async fn run_fs_tool<P: SshProvider>(
+    manager: &SshManager<P>,
+    connection_id: &str,
+    call: &ToolCall,
+    audit_id: String,
+    started: chrono::DateTime<Utc>,
+    timer: Instant,
+) -> Result<FsOutcome, Box<ToolResult>> {
+    let value = |key: &str| call.input.get(key);
+    let invalid = |reason: &str| {
+        Box::new(failed(
+            call,
+            audit_id.clone(),
+            started,
+            timer,
+            "TOOL_SCHEMA_INVALID",
+            reason,
+        ))
+    };
+    let path = || {
+        value("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("path is required"))
+    };
+    match call.name.as_str() {
+        "fs.list" => {
+            let dir = value("path").and_then(Value::as_str).unwrap_or("/");
+            let entries = manager.fs_list(connection_id, dir).await.map_err(|error| {
+                Box::new(fs_failed(call, audit_id.clone(), started, timer, error))
+            })?;
+            let count = entries.len();
+            let data = serde_json::to_value(entries).unwrap_or(Value::Null);
+            Ok((
+                format!("列出 {count} 个条目"),
+                data,
+                Some(format!("fs.list {dir}")),
+                None,
+                false,
+            ))
+        }
+        "fs.stat" => {
+            let p = path()?;
+            let entry = manager.fs_stat(connection_id, p).await.map_err(|error| {
+                Box::new(fs_failed(call, audit_id.clone(), started, timer, error))
+            })?;
+            let name = entry.name.clone();
+            let data = serde_json::to_value(entry).unwrap_or(Value::Null);
+            Ok((
+                format!("{name} 状态读取完成"),
+                data,
+                Some(format!("fs.stat {p}")),
+                None,
+                false,
+            ))
+        }
+        "fs.read" => {
+            let p = path()?;
+            let max_bytes = value("maxBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(FS_READ_MAX_BYTES);
+            let entry = manager.fs_stat(connection_id, p).await.map_err(|error| {
+                Box::new(fs_failed(call, audit_id.clone(), started, timer, error))
+            })?;
+            if entry.kind != FileKind::File {
+                return Err(Box::new(failed_with(
+                    call,
+                    audit_id,
+                    started,
+                    timer,
+                    "FS_BINARY_UNSUPPORTED",
+                    "目标不是普通文件，无法读取内容",
+                    "fs",
+                    false,
+                )));
+            }
+            if entry.size > max_bytes {
+                return Err(Box::new(failed_with(
+                    call,
+                    audit_id,
+                    started,
+                    timer,
+                    "FS_READ_TOO_LARGE",
+                    &format!("文件大小 {} 字节超过读取上限", entry.size),
+                    "fs",
+                    false,
+                )));
+            }
+            let mut content = Vec::new();
+            let mut offset = 0u64;
+            loop {
+                let chunk = manager
+                    .fs_read_range(connection_id, p, offset, DOWNLOAD_CHUNK_LEN)
+                    .await
+                    .map_err(|error| {
+                        Box::new(fs_failed(call, audit_id.clone(), started, timer, error))
+                    })?;
+                let read = chunk.data.len();
+                content.extend_from_slice(&chunk.data);
+                offset += read as u64;
+                if chunk.eof || read == 0 || content.len() as u64 >= entry.size {
+                    break;
+                }
+            }
+            let digest = Some(format!("{:x}", Sha256::digest(&content)));
+            if is_binary_content(&content) {
+                return Err(Box::new(failed_with(
+                    call,
+                    audit_id,
+                    started,
+                    timer,
+                    "FS_BINARY_UNSUPPORTED",
+                    "二进制文件内容不提供给 AI，仅可访问元数据",
+                    "fs",
+                    false,
+                )));
+            }
+            let text = match String::from_utf8(content) {
+                Ok(text) => text,
+                Err(_) => {
+                    return Err(Box::new(failed_with(
+                        call,
+                        audit_id,
+                        started,
+                        timer,
+                        "FS_BINARY_UNSUPPORTED",
+                        "非 UTF-8 文本不提供给 AI",
+                        "fs",
+                        false,
+                    )))
+                }
+            };
+            let redacted = redact(&text);
+            let truncated = redacted.chars().count() > AI_READ_BUDGET_BYTES;
+            let shown: String = redacted.chars().take(AI_READ_BUDGET_BYTES).collect();
+            Ok((
+                format!("已读取文本文件 {} 字节", entry.size),
+                serde_json::json!({
+                    "path": p,
+                    "kind": "file",
+                    "size": entry.size,
+                    "truncated": truncated,
+                    "content": shown,
+                }),
+                Some(format!("fs.read {p}")),
+                digest,
+                truncated,
+            ))
+        }
+        "fs.mkdir" => {
+            let p = path()?;
+            manager.fs_mkdir(connection_id, p).await.map_err(|error| {
+                Box::new(fs_failed(call, audit_id.clone(), started, timer, error))
+            })?;
+            Ok((
+                "目录创建成功".into(),
+                serde_json::json!({"path": p}),
+                Some(format!("fs.mkdir {p}")),
+                None,
+                false,
+            ))
+        }
+        "fs.rename" => {
+            let from = value("from")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("from is required"))?;
+            let to = value("to")
+                .and_then(Value::as_str)
+                .ok_or_else(|| invalid("to is required"))?;
+            manager
+                .fs_rename(connection_id, from, to)
+                .await
+                .map_err(|error| {
+                    Box::new(fs_failed(call, audit_id.clone(), started, timer, error))
+                })?;
+            Ok((
+                format!("{from} 已重命名为 {to}"),
+                serde_json::json!({"from": from, "to": to}),
+                Some(format!("fs.rename {from}")),
+                None,
+                false,
+            ))
+        }
+        "fs.delete" => {
+            let p = path()?;
+            let recursive = value("recursive").and_then(Value::as_bool).unwrap_or(false);
+            manager
+                .fs_delete(connection_id, p, recursive)
+                .await
+                .map_err(|error| {
+                    Box::new(fs_failed(call, audit_id.clone(), started, timer, error))
+                })?;
+            Ok((
+                "删除完成".into(),
+                serde_json::json!({"path": p, "recursive": recursive}),
+                Some(format!("fs.delete {p}")),
+                None,
+                false,
+            ))
+        }
+        _ => Err(Box::new(failed(
+            call,
+            audit_id,
+            started,
+            timer,
+            "TOOL_NOT_FOUND",
+            "未知 fs 工具",
+        ))),
+    }
+}
+
+fn fs_result(
+    call: &ToolCall,
+    audit_id: String,
+    started: chrono::DateTime<Utc>,
+    timer: Instant,
+    (summary, data, label, digest, truncated): FsOutcome,
+    mutation: bool,
+) -> ToolResult {
+    ToolResult {
+        call_id: call.id.clone(),
+        status: "success".into(),
+        data: Some(data),
+        summary,
+        evidence: vec![EvidenceRef {
+            kind: "sftp".into(),
+            label: label.unwrap_or_else(|| format!("fs {}", call.name)),
+            digest_sha256: digest,
+            sanitized_excerpt: None,
+        }],
+        changed_resources: if mutation {
+            vec![call.target.clone()]
+        } else {
+            Vec::new()
+        },
+        warnings: Vec::new(),
+        error: None,
+        meta: ToolResultMeta {
+            duration_ms: timer.elapsed().as_millis() as u64,
+            truncated,
+            started_at: started.to_rfc3339(),
+            finished_at: Utc::now().to_rfc3339(),
+            audit_id,
+        },
+    }
+}
+
+fn fs_failed(
+    call: &ToolCall,
+    audit_id: String,
+    started: chrono::DateTime<Utc>,
+    timer: Instant,
+    error: crate::fs::FtpError,
+) -> ToolResult {
+    let dto = crate::error::AppError::from(error).dto();
+    failed_with(
+        call,
+        audit_id,
+        started,
+        timer,
+        &dto.code,
+        &dto.message,
+        &dto.category,
+        dto.retryable,
+    )
+}
+
+fn is_binary_content(content: &[u8]) -> bool {
+    content.iter().take(8192).any(|&byte| byte == 0)
 }
 
 fn build_request(call: &ToolCall, default_timeout: u64) -> Result<ExecRequest, String> {
@@ -1017,11 +1437,33 @@ fn failed(
     code: &str,
     message: &str,
 ) -> ToolResult {
+    failed_with(
+        call,
+        audit_id,
+        started,
+        timer,
+        code,
+        message,
+        "tool",
+        code == "TOOL_EXEC_FAILED",
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn failed_with(
+    call: &ToolCall,
+    audit_id: String,
+    started: chrono::DateTime<Utc>,
+    timer: Instant,
+    code: &str,
+    message: &str,
+    category: &str,
+    retryable: bool,
+) -> ToolResult {
     let error = crate::error::AppErrorDto {
         code: code.into(),
         message: message.into(),
-        retryable: code == "TOOL_EXEC_FAILED",
-        category: "tool".into(),
+        retryable,
+        category: category.into(),
         details: Some(serde_json::json!({"reason":message})),
     };
     ToolResult {

@@ -20,7 +20,7 @@ use crate::{
     app_state::AppState,
     commands,
     credentials::{CredentialError, CredentialProvider, SecretValue},
-    fs::FtpError,
+    fs::{validate_remote_path, FtpError},
     models::{AuthRef, Environment, ServerProfile},
     policy::ApprovalGrant,
     ssh::{
@@ -30,6 +30,7 @@ use crate::{
     tools::{ResourceTarget, ToolCall, ToolExecutionResponse},
 };
 use chrono::Utc;
+use tauri::Manager;
 
 // ---------------------------------------------------------------------------
 // Scripted SSH provider: each exec pops the next queued outcome in order.
@@ -48,14 +49,54 @@ enum ScriptedExec {
     Error(String),
 }
 
+type WriteLog = Arc<Mutex<Vec<(String, u64, usize, bool)>>>;
+
 struct ScriptedSshProvider {
     queue: Mutex<Vec<ScriptedExec>>,
+    /// Optional in-memory file backend (path -> bytes) for transfer tests.
+    files: Mutex<HashMap<String, Vec<u8>>>,
+    /// Per-chunk read delay, stabilizes pause windows in transfer tests.
+    read_delay_ms: u64,
+    /// Every fs_write_range call: (path, offset, len, truncate). The Arc lets
+    /// a test keep inspecting the log after the provider moves into the app.
+    writes: WriteLog,
+}
+
+impl ScriptedSshProvider {
+    fn writes_handle(&self) -> WriteLog {
+        Arc::clone(&self.writes)
+    }
 }
 
 impl ScriptedSshProvider {
     fn new(script: Vec<ScriptedExec>) -> Self {
         Self {
             queue: Mutex::new(script),
+            files: Mutex::new(HashMap::new()),
+            read_delay_ms: 0,
+            writes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_files(script: Vec<ScriptedExec>, files: HashMap<String, Vec<u8>>) -> Self {
+        Self {
+            queue: Mutex::new(script),
+            files: Mutex::new(files),
+            read_delay_ms: 0,
+            writes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_slow_reads(
+        script: Vec<ScriptedExec>,
+        files: HashMap<String, Vec<u8>>,
+        delay_ms: u64,
+    ) -> Self {
+        Self {
+            queue: Mutex::new(script),
+            files: Mutex::new(files),
+            read_delay_ms: delay_ms,
+            writes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -101,16 +142,56 @@ impl SshProvider for ScriptedSshProvider {
     async fn fs_list(
         &self,
         _connection_id: &str,
-        _path: &str,
+        path: &str,
     ) -> Result<Vec<crate::fs::FileEntry>, FtpError> {
-        Err(FtpError::NotFound)
+        validate_remote_path(path)?;
+        let files = self.files.lock().expect("script files");
+        let entries = files
+            .keys()
+            .filter(|key| {
+                let parent = key
+                    .rsplit_once('/')
+                    .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+                    .unwrap_or("/");
+                parent == path
+            })
+            .map(|key| {
+                let name = key.rsplit('/').next().unwrap_or(key).to_string();
+                crate::fs::FileEntry {
+                    name,
+                    path: key.clone(),
+                    kind: crate::fs::FileKind::File,
+                    size: files[key].len() as u64,
+                    mode: "0644".into(),
+                    owner_id: None,
+                    group_id: None,
+                    modified_at: None,
+                    symlink_target: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(entries)
     }
     async fn fs_stat(
         &self,
         _connection_id: &str,
-        _path: &str,
+        path: &str,
     ) -> Result<crate::fs::FileEntry, FtpError> {
-        Err(FtpError::NotFound)
+        validate_remote_path(path)?;
+        let files = self.files.lock().expect("script files");
+        let content = files.get(path).ok_or(FtpError::NotFound)?;
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        Ok(crate::fs::FileEntry {
+            name,
+            path: path.into(),
+            kind: crate::fs::FileKind::File,
+            size: content.len() as u64,
+            mode: "0644".into(),
+            owner_id: None,
+            group_id: None,
+            modified_at: None,
+            symlink_target: None,
+        })
     }
     async fn fs_mkdir(&self, _connection_id: &str, _path: &str) -> Result<(), FtpError> {
         Err(FtpError::NotFound)
@@ -134,21 +215,53 @@ impl SshProvider for ScriptedSshProvider {
     async fn fs_read_range(
         &self,
         _connection_id: &str,
-        _path: &str,
-        _offset: u64,
-        _len: u32,
+        path: &str,
+        offset: u64,
+        len: u32,
     ) -> Result<crate::fs::FsChunk, FtpError> {
-        Err(FtpError::NotFound)
+        if self.read_delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(self.read_delay_ms)).await;
+        }
+        validate_remote_path(path)?;
+        let files = self.files.lock().expect("script files");
+        let content = files.get(path).ok_or(FtpError::NotFound)?;
+        if offset > content.len() as u64 {
+            return Ok(crate::fs::FsChunk {
+                data: Vec::new(),
+                eof: true,
+            });
+        }
+        let start = offset as usize;
+        let end = (start + len as usize).min(content.len());
+        Ok(crate::fs::FsChunk {
+            data: content[start..end].to_vec(),
+            eof: end >= content.len(),
+        })
     }
     async fn fs_write_range(
         &self,
         _connection_id: &str,
-        _path: &str,
-        _offset: u64,
-        _data: &[u8],
-        _truncate: bool,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        truncate: bool,
     ) -> Result<(), FtpError> {
-        Err(FtpError::NotFound)
+        validate_remote_path(path)?;
+        let mut files = self.files.lock().expect("script files");
+        let content = files.entry(path.into()).or_default();
+        if truncate && offset == 0 {
+            content.clear();
+        }
+        let required = offset as usize + data.len();
+        if content.len() < required {
+            content.resize(required, 0);
+        }
+        content[offset as usize..required].copy_from_slice(data);
+        self.writes
+            .lock()
+            .expect("write log")
+            .push((path.into(), offset, data.len(), truncate));
+        Ok(())
     }
     async fn exec(
         &self,
@@ -241,16 +354,32 @@ struct TestHarness {
 
 fn harness(script: Vec<ScriptedExec>) -> TestHarness {
     let credentials = Arc::new(TestCredentials::default());
-    let state = AppState {
+    let state = state_with_provider(ScriptedSshProvider::new(script));
+    TestHarness { state, credentials }
+}
+
+/// Reusable AppState builder shared by the tool harness and the transfer
+/// tests (which additionally manage the state into a tauri mock app).
+fn state_with_provider(provider: ScriptedSshProvider) -> AppState {
+    let credentials = Arc::new(TestCredentials::default());
+    AppState {
         db: Mutex::new(crate::storage::Database::open(":memory:").expect("test database")),
         credentials: Arc::clone(&credentials) as Arc<dyn CredentialProvider>,
-        ssh: SshManager::new(Box::new(ScriptedSshProvider::new(script))),
+        ssh: SshManager::new(Box::new(provider)),
         host_keys: Arc::new(HostKeyTrustStore::default()),
         pending_tool_calls: Mutex::new(HashMap::new()),
         ai_runs: Mutex::new(HashMap::new()),
         transfers: Arc::new(Mutex::new(HashMap::new())),
-    };
-    TestHarness { state, credentials }
+    }
+}
+
+/// Builds a background-runtime-free tauri mock app so transfer commands
+/// (which need `State` + `AppHandle`) run through their real signatures.
+async fn transfer_app(provider: ScriptedSshProvider) -> tauri::App<tauri::test::MockRuntime> {
+    tauri::test::mock_builder()
+        .manage(state_with_provider(provider))
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app")
 }
 
 fn profile(id: &str, environment: Environment, username: &str) -> ServerProfile {
@@ -1576,4 +1705,623 @@ fn agent_run_dto_serializes_camel_case_wire_format() {
     assert_eq!(wire["serverId"], "srv");
     assert_eq!(wire["pendingToolCallId"], "call_0");
     assert_eq!(wire["steps"][0]["toolCallId"], "call_0");
+}
+
+// ---------------------------------------------------------------------------
+// M12 — transfer pause/resume/retry over the real command + mock-app path.
+// ---------------------------------------------------------------------------
+
+fn transfer_request(kind: &str, local_path: &str) -> crate::commands::fs::TransferRequest {
+    crate::commands::fs::TransferRequest {
+        kind: kind.into(),
+        server_id: "srv-xfer".into(),
+        connection_id: "conn-xfer".into(),
+        remote_path: "/srv/data.bin".into(),
+        local_path: local_path.into(),
+        overwrite: true,
+    }
+}
+
+async fn wait_transfer<R: tauri::Runtime>(
+    app: &tauri::App<R>,
+    id: &str,
+    predicate: impl Fn(&crate::commands::fs::TransferJobDto) -> bool,
+) -> crate::commands::fs::TransferJobDto {
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let jobs =
+                commands::fs::fs_transfers_list(app.state::<AppState>()).expect("list transfers");
+            if let Some(job) = jobs.iter().find(|job| job.transfer_id == id) {
+                if predicate(job) {
+                    return job.clone();
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("transfer state transition timed out")
+}
+
+#[tokio::test]
+async fn transfer_pause_and_resume_resumes_from_offset_and_completes() {
+    let chunk = crate::fs::DOWNLOAD_CHUNK_LEN as usize;
+    let remote = vec![0x5A_u8; 3 * chunk + 17];
+    let provider = ScriptedSshProvider::with_slow_reads(
+        vec![],
+        HashMap::from([("/srv/data.bin".into(), remote.clone())]),
+        30,
+    );
+    let app = transfer_app(provider).await;
+    let local = std::env::temp_dir().join(format!("infradeck-m12-{}.bin", Uuid::new_v4()));
+    let local_str = local.display().to_string();
+
+    let job = commands::fs::fs_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        transfer_request("download", &local_str),
+    )
+    .await
+    .expect("start download");
+    assert_eq!(job.state, "running");
+
+    // The slow provider (30ms/chunk) guarantees the transfer is still running
+    // after this window while having passed at least the first chunk.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    assert!(
+        commands::fs::fs_transfer_pause(app.state::<AppState>(), job.transfer_id.clone())
+            .expect("pause")
+    );
+    let mid = wait_transfer(&app, &job.transfer_id, |j| j.state == "paused").await;
+    // The in-map snapshot reflects the exact byte offset the loop stopped at.
+    assert!(mid.transferred_bytes > 0 && mid.transferred_bytes < mid.total_bytes);
+
+    assert!(
+        commands::fs::fs_transfer_resume(app.state::<AppState>(), job.transfer_id.clone())
+            .expect("resume")
+    );
+    let done = wait_transfer(&app, &job.transfer_id, |j| j.state == "completed").await;
+    assert_eq!(
+        done.transferred_bytes, done.total_bytes,
+        "resume must finish the file"
+    );
+
+    let local_bytes = tokio::fs::read(&local).await.expect("read local file");
+    assert_eq!(
+        local_bytes, remote,
+        "downloaded bytes must byte-match the source"
+    );
+    let _ = tokio::fs::remove_file(&local).await;
+}
+
+#[tokio::test]
+async fn transfer_pause_resume_are_state_gated() {
+    let provider = ScriptedSshProvider::with_files(
+        vec![],
+        HashMap::from([("/srv/data.bin".into(), b"tiny".to_vec())]),
+    );
+    let app = transfer_app(provider).await;
+    let local = std::env::temp_dir().join(format!("infradeck-m12-gate-{}.bin", Uuid::new_v4()));
+    let job = commands::fs::fs_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        transfer_request("download", &local.display().to_string()),
+    )
+    .await
+    .expect("start");
+    wait_transfer(&app, &job.transfer_id, |j| j.state == "completed").await;
+
+    assert!(
+        !commands::fs::fs_transfer_pause(app.state::<AppState>(), job.transfer_id.clone())
+            .expect("pause completed job must be rejected"),
+        "pause must only apply to running jobs"
+    );
+    assert!(
+        !commands::fs::fs_transfer_resume(app.state::<AppState>(), job.transfer_id.clone())
+            .expect("resume completed job must be rejected"),
+        "resume must only apply to paused jobs"
+    );
+    assert!(
+        !commands::fs::fs_transfer_pause(
+            app.state::<AppState>(),
+            "00000000-0000-4000-8000-000000000000".into(),
+        )
+        .expect("unknown id must be rejected"),
+        "unknown transfer id must return false"
+    );
+    let _ = tokio::fs::remove_file(local).await;
+}
+
+#[tokio::test]
+async fn transfer_cancel_while_paused_marks_cancelled() {
+    let chunk = crate::fs::DOWNLOAD_CHUNK_LEN as usize;
+    let remote = vec![0xC3_u8; 4 * chunk + 9];
+    let provider = ScriptedSshProvider::with_slow_reads(
+        vec![],
+        HashMap::from([("/srv/data.bin".into(), remote)]),
+        30,
+    );
+    let app = transfer_app(provider).await;
+    let local = std::env::temp_dir().join(format!("infradeck-m12-cancel-{}.bin", Uuid::new_v4()));
+    let job = commands::fs::fs_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        transfer_request("download", &local.display().to_string()),
+    )
+    .await
+    .expect("start");
+
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    assert!(
+        commands::fs::fs_transfer_pause(app.state::<AppState>(), job.transfer_id.clone())
+            .expect("pause")
+    );
+    wait_transfer(&app, &job.transfer_id, |j| j.state == "paused").await;
+
+    assert!(
+        commands::fs::fs_transfer_cancel(app.state::<AppState>(), job.transfer_id.clone())
+            .expect("cancel while paused")
+    );
+    let done = wait_transfer(&app, &job.transfer_id, |j| {
+        matches!(j.state.as_str(), "cancelled" | "failed")
+    })
+    .await;
+    assert_eq!(
+        done.state, "cancelled",
+        "cancel during pause must cancel, not fail"
+    );
+    let _ = tokio::fs::remove_file(local).await;
+}
+
+// ---------------------------------------------------------------------------
+// M11 — fs.* AI tools (SFTP executor + secret-path policy)
+// ---------------------------------------------------------------------------
+
+fn path_target(server_id: &str, path: &str) -> ResourceTarget {
+    ResourceTarget::Path {
+        server_id: server_id.into(),
+        path: path.into(),
+    }
+}
+
+async fn connect_profile(state: &AppState, profile: &ServerProfile) {
+    state.ssh.connect(profile, None).await.expect("connect");
+}
+
+fn fs_state(files: HashMap<String, Vec<u8>>) -> AppState {
+    state_with_provider(ScriptedSshProvider::with_files(vec![], files))
+}
+
+#[tokio::test]
+async fn fs_read_streams_text_and_requires_no_approval() {
+    let state = fs_state(HashMap::from([(
+        "/srv/app.conf".into(),
+        b"port=8080\npassword=super-secret\n".to_vec(),
+    )]));
+    let profile = profile("srv-fs", Environment::Dev, "dev");
+    state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_profile(&state, &profile).await;
+
+    let result = expect_result(
+        commands::execute_tool(
+            &state,
+            call(
+                "fs.read",
+                serde_json::json!({"path": "/srv/app.conf"}),
+                path_target("srv-fs", "/srv/app.conf"),
+            ),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(
+        result.status, "success",
+        "read-only fs.read must not need approval"
+    );
+    let data = result.data.as_ref().unwrap();
+    assert_eq!(data["size"], 32u64);
+    assert_eq!(data["truncated"], false);
+    // Tool output is untrusted: credential-looking lines never reach the model.
+    assert_eq!(data["content"], "[REDACTED]");
+    assert_eq!(result.evidence[0].kind, "sftp");
+}
+
+#[tokio::test]
+async fn fs_read_rejects_oversized_file() {
+    let state = fs_state(HashMap::from([("/srv/big.log".into(), vec![b'a'; 256])]));
+    let profile = profile("srv-fs-big", Environment::Dev, "dev");
+    state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_profile(&state, &profile).await;
+
+    let result = expect_result(
+        commands::execute_tool(
+            &state,
+            call(
+                "fs.read",
+                serde_json::json!({"path": "/srv/big.log", "maxBytes": 32}),
+                path_target("srv-fs-big", "/srv/big.log"),
+            ),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(result.status, "failed");
+    let error = result.error.expect("error dto");
+    assert_eq!(error.code, "FS_READ_TOO_LARGE");
+    assert_eq!(error.category, "fs");
+    assert!(!error.retryable);
+}
+
+#[tokio::test]
+async fn fs_read_rejects_binary_content() {
+    let mut binary = b"\x7fELF".to_vec();
+    binary.extend_from_slice(&[0u8; 64]);
+    let state = fs_state(HashMap::from([("/srv/app.bin".into(), binary)]));
+    let profile = profile("srv-fs-bin", Environment::Dev, "dev");
+    state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_profile(&state, &profile).await;
+
+    let result = expect_result(
+        commands::execute_tool(
+            &state,
+            call(
+                "fs.read",
+                serde_json::json!({"path": "/srv/app.bin"}),
+                path_target("srv-fs-bin", "/srv/app.bin"),
+            ),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(result.status, "failed");
+    assert_eq!(
+        result.error.expect("error dto").code,
+        "FS_BINARY_UNSUPPORTED"
+    );
+}
+
+#[tokio::test]
+async fn fs_read_secret_path_requires_approval() {
+    let state = fs_state(HashMap::from([(
+        "/home/dev/.ssh/id_rsa".into(),
+        b"-----BEGIN OPENSSH PRIVATE KEY-----\n".to_vec(),
+    )]));
+    let profile = profile("srv-fs-secret", Environment::Dev, "dev");
+    state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_profile(&state, &profile).await;
+
+    let approval = expect_approval(
+        commands::execute_tool(
+            &state,
+            call(
+                "fs.read",
+                serde_json::json!({"path": "/home/dev/.ssh/id_rsa"}),
+                path_target("srv-fs-secret", "/home/dev/.ssh/id_rsa"),
+            ),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert!(
+        approval
+            .risk
+            .matched_rules
+            .contains(&"POLICY_SECRET_PATH".into()),
+        "secret-path rule must be recorded, got {:?}",
+        approval.risk.matched_rules
+    );
+    assert_eq!(approval.risk.level, crate::policy::RiskLevel::High);
+}
+
+#[tokio::test]
+async fn fs_list_runs_without_approval() {
+    let state = fs_state(HashMap::from([
+        ("/srv/app.conf".into(), b"port=8080".to_vec()),
+        ("/srv/other/.env".into(), b"A=1".to_vec()),
+        ("/etc/hostname".into(), b"host".to_vec()),
+    ]));
+    let profile = profile("srv-fs-list", Environment::Dev, "dev");
+    state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_profile(&state, &profile).await;
+
+    let result = expect_result(
+        commands::execute_tool(
+            &state,
+            call(
+                "fs.list",
+                serde_json::json!({"path": "/srv"}),
+                path_target("srv-fs-list", "/srv"),
+            ),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(result.status, "success");
+    let entries = result.data.as_ref().unwrap().as_array().expect("entries");
+    assert_eq!(entries.len(), 1, "only direct children of /srv are listed");
+    assert_eq!(entries[0]["name"], "app.conf");
+}
+
+// ---------------------------------------------------------------------------
+// M13 — server-to-server transfer (chunk bridge)
+// ---------------------------------------------------------------------------
+
+fn ss2s_request(
+    source_path: &str,
+    dest_path: &str,
+    overwrite: bool,
+) -> commands::fs::Ss2sTransferRequest {
+    commands::fs::Ss2sTransferRequest {
+        source_server_id: "srv-src".into(),
+        source_connection_id: "conn-src".into(),
+        source_path: source_path.into(),
+        dest_server_id: "srv-dst".into(),
+        dest_connection_id: "conn-dst".into(),
+        dest_path: dest_path.into(),
+        overwrite,
+    }
+}
+
+#[tokio::test]
+async fn ss2s_chunk_boundary_correct() {
+    // 1 MiB + 3 bytes: 4 full 256 KiB chunks plus a 3-byte tail.
+    let source = {
+        let mut data = vec![0xABu8; 1024 * 1024];
+        data.extend_from_slice(b"xyz");
+        data
+    };
+    let provider = ScriptedSshProvider::with_files(
+        vec![],
+        HashMap::from([("/src/data.bin".into(), source.clone())]),
+    );
+    let app = transfer_app(provider).await;
+    let job = commands::fs::ss2s_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        ss2s_request("/src/data.bin", "/dst/data.bin", false),
+    )
+    .await
+    .expect("start");
+    assert_eq!(job.kind, "serverToServer");
+    assert_eq!(job.total_bytes, 1024 * 1024 + 3);
+
+    let done = wait_transfer(&app, &job.transfer_id, |j| {
+        matches!(j.state.as_str(), "completed" | "failed")
+    })
+    .await;
+    assert_eq!(done.state, "completed", "error: {:?}", done.error);
+
+    let provider_files = app.state::<AppState>().transfers.lock().unwrap().len();
+    assert_eq!(provider_files, 1);
+    let dest = {
+        let state = app.state::<AppState>();
+        // Read the in-memory dest through the provider-backed fs_stat/read path.
+        let chunk = state
+            .ssh
+            .fs_read_range("conn-dst", "/dst/data.bin", 0, u32::MAX >> 1)
+            .await
+            .expect("read dest");
+        chunk.data
+    };
+    assert_eq!(dest, source, "dest must byte-match the source");
+
+    // Chunk assertions from the write log: 5 chunks, only the first truncates.
+    // (Read the log through a fresh provider is impossible; assert via dest
+    // size + chunking math instead.)
+    let state = app.state::<AppState>();
+    let stat = state
+        .ssh
+        .fs_stat("conn-dst", "/dst/data.bin")
+        .await
+        .expect("stat dest");
+    assert_eq!(stat.size as usize, source.len());
+}
+
+#[tokio::test]
+async fn ss2s_write_log_records_chunk_geometry() {
+    // 1 MiB + 3 bytes → 5 chunks; only the first write truncates.
+    let source = {
+        let mut data = vec![9u8; 1024 * 1024];
+        data.extend_from_slice(b"xyz");
+        data
+    };
+    let provider =
+        ScriptedSshProvider::with_files(vec![], HashMap::from([("/src/a.bin".into(), source)]));
+    let writes = provider.writes_handle();
+    let app = transfer_app(provider).await;
+    let job = commands::fs::ss2s_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        ss2s_request("/src/a.bin", "/dst/a.bin", false),
+    )
+    .await
+    .expect("start");
+    let done = wait_transfer(&app, &job.transfer_id, |j| {
+        matches!(j.state.as_str(), "completed" | "failed")
+    })
+    .await;
+    assert_eq!(done.state, "completed", "error: {:?}", done.error);
+
+    let log = writes.lock().expect("write log").clone();
+    assert_eq!(log.len(), 5, "4 full chunks + 3-byte tail: {:?}", log);
+    let chunk_len = 256 * 1024;
+    for (index, (path, offset, len, truncate)) in log.iter().enumerate() {
+        assert_eq!(path, "/dst/a.bin");
+        assert_eq!(*truncate, index == 0, "only the first chunk truncates");
+        if index < 4 {
+            assert_eq!(*offset, (index as u64) * chunk_len as u64);
+            assert_eq!(*len, chunk_len);
+        } else {
+            assert_eq!(*offset, 4 * chunk_len as u64);
+            assert_eq!(*len, 3);
+        }
+    }
+}
+
+#[tokio::test]
+async fn ss2s_rejects_same_node() {
+    let app = transfer_app(ScriptedSshProvider::with_files(
+        vec![],
+        HashMap::from([("/src/a.bin".into(), b"data".to_vec())]),
+    ))
+    .await;
+    let mut request = ss2s_request("/src/a.bin", "/dst/a.bin", false);
+    request.dest_connection_id = request.source_connection_id.clone();
+    let error =
+        commands::fs::ss2s_transfer_start(app.state::<AppState>(), app.handle().clone(), request)
+            .await
+            .expect_err("same node must be rejected");
+    assert_eq!(error.dto().code, "SS2S_SAME_NODE");
+}
+
+#[tokio::test]
+async fn ss2s_dest_exists_requires_overwrite() {
+    let app = transfer_app(ScriptedSshProvider::with_files(
+        vec![],
+        HashMap::from([
+            ("/src/a.bin".into(), b"new-content".to_vec()),
+            ("/dst/a.bin".into(), b"old".to_vec()),
+        ]),
+    ))
+    .await;
+    let error = commands::fs::ss2s_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        ss2s_request("/src/a.bin", "/dst/a.bin", false),
+    )
+    .await
+    .expect_err("existing dest without overwrite must fail");
+    assert_eq!(error.dto().code, "SS2S_DEST_EXISTS");
+
+    let job = commands::fs::ss2s_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        ss2s_request("/src/a.bin", "/dst/a.bin", true),
+    )
+    .await
+    .expect("overwrite start");
+    let done = wait_transfer(&app, &job.transfer_id, |j| {
+        matches!(j.state.as_str(), "completed" | "failed")
+    })
+    .await;
+    assert_eq!(done.state, "completed");
+    let state = app.state::<AppState>();
+    let chunk = state
+        .ssh
+        .fs_read_range("conn-dst", "/dst/a.bin", 0, u32::MAX >> 1)
+        .await
+        .expect("read dest");
+    assert_eq!(
+        chunk.data,
+        b"new-content".to_vec(),
+        "overwrite must truncate"
+    );
+}
+
+#[tokio::test]
+async fn ss2s_cancel_mid_transfer_stops_writes() {
+    let source = vec![0x5Au8; 256 * 1024 * 8]; // 2 MiB, 8 chunks @30ms → ~240ms
+    let provider = ScriptedSshProvider::with_slow_reads(
+        vec![],
+        HashMap::from([("/src/big.bin".into(), source.clone())]),
+        30,
+    );
+    let app = transfer_app(provider).await;
+    let job = commands::fs::ss2s_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        ss2s_request("/src/big.bin", "/dst/big.bin", false),
+    )
+    .await
+    .expect("start");
+
+    tokio::time::sleep(std::time::Duration::from_millis(90)).await;
+    assert!(
+        commands::fs::fs_transfer_cancel(app.state::<AppState>(), job.transfer_id.clone())
+            .expect("cancel")
+    );
+    let done = wait_transfer(&app, &job.transfer_id, |j| {
+        matches!(j.state.as_str(), "cancelled" | "failed")
+    })
+    .await;
+    assert_eq!(
+        done.state, "cancelled",
+        "cancel must not surface as failure"
+    );
+    assert!(done.transferred_bytes < done.total_bytes);
+}
+
+#[tokio::test]
+async fn ss2s_transfer_writes_audit_trail() {
+    let app = transfer_app(ScriptedSshProvider::with_files(
+        vec![],
+        HashMap::from([("/src/a.conf".into(), b"key=value".to_vec())]),
+    ))
+    .await;
+    let job = commands::fs::ss2s_transfer_start(
+        app.state::<AppState>(),
+        app.handle().clone(),
+        ss2s_request("/src/a.conf", "/dst/a.conf", false),
+    )
+    .await
+    .expect("start");
+    let done = wait_transfer(&app, &job.transfer_id, |j| {
+        matches!(j.state.as_str(), "completed" | "failed")
+    })
+    .await;
+    assert_eq!(done.state, "completed");
+
+    let events = app
+        .state::<AppState>()
+        .db
+        .lock()
+        .expect("db")
+        .list_audit(50)
+        .expect("audit");
+    let ss2s = events
+        .iter()
+        .filter(|event| event.action == "ss2s.transfer")
+        .collect::<Vec<_>>();
+    // The audit schema only accepts terminal outcomes, so exactly one record
+    // is written when the transfer finishes.
+    assert_eq!(ss2s.len(), 1, "terminal outcome audited once");
+    assert_eq!(ss2s[0].outcome, "success");
+    assert!(
+        events.iter().any(|event| event
+            .sanitized_details
+            .get("sourcePath")
+            .and_then(|v| v.as_str())
+            == Some("/src/a.conf")),
+        "audit must record the source path"
+    );
 }

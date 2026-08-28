@@ -1,6 +1,6 @@
 use crate::{
     ai::AgentRunState,
-    commands::fs::TransferJobDto,
+    commands::fs::TransferHandle,
     config::{AppSettings, PermissionMode, SecretProvider, SecretReference, WorkspaceSettings},
     credentials::{CredentialProvider, PlatformCredentialProvider},
     error::AppError,
@@ -15,7 +15,6 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
-use tokio_util::sync::CancellationToken;
 
 pub struct AppState {
     pub db: Mutex<Database>,
@@ -24,7 +23,7 @@ pub struct AppState {
     pub host_keys: Arc<HostKeyTrustStore>,
     pub pending_tool_calls: Mutex<HashMap<String, ToolCall>>,
     pub ai_runs: Mutex<HashMap<String, AgentRunState>>,
-    pub transfers: Arc<Mutex<HashMap<String, (TransferJobDto, CancellationToken)>>>,
+    pub transfers: Arc<Mutex<HashMap<String, TransferHandle>>>,
 }
 
 impl AppState {

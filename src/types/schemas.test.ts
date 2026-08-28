@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aiProviderSettingsInputSchema, appErrorSchema, auditQuerySchema, conversationListQuerySchema, serverProfileInputSchema, transferRequestSchema } from './schemas';
+import { aiProviderSettingsInputSchema, appErrorSchema, auditQuerySchema, conversationListQuerySchema, serverProfileInputSchema, ss2sTransferRequestSchema, transferRequestSchema } from './schemas';
 
 describe('contract schemas', () => {
   it('accepts a server profile input', () => {
@@ -33,5 +33,17 @@ describe('contract schemas', () => {
     expect(transferRequestSchema.safeParse({ ...base, localPath: '   ' }).success).toBe(false);
     expect(transferRequestSchema.safeParse({ ...base, kind: 'sync' }).success).toBe(false);
     expect(transferRequestSchema.parse({ ...base, overwrite: true }).overwrite).toBe(true);
+  });
+  it('validates a server-to-server transfer request', () => {
+    const base = {
+      sourceServerId: 'srv-a', sourceConnectionId: 'conn-a', sourcePath: '/srv/data/file.log',
+      destServerId: 'srv-b', destConnectionId: 'conn-b', destPath: '/srv/data/file.log',
+      overwrite: false,
+    };
+    expect(ss2sTransferRequestSchema.parse(base).destServerId).toBe('srv-b');
+    expect(ss2sTransferRequestSchema.safeParse({ ...base, sourcePath: 'relative/path' }).success).toBe(false);
+    expect(ss2sTransferRequestSchema.safeParse({ ...base, destPath: '/a//b/../c' }).success).toBe(true); // shape-only; `..` is rejected on the Rust side
+    expect(ss2sTransferRequestSchema.safeParse({ ...base, overwrite: 'yes' }).success).toBe(false);
+    expect(ss2sTransferRequestSchema.safeParse({ ...base, destConnectionId: 'conn-a' }).success).toBe(false); // same node
   });
 });

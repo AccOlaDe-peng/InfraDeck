@@ -145,3 +145,28 @@ footer { margin-top: 22px; color: #667b98; font-size: 11px; }.text-button { bord
 .transfer-row progress { flex: 1; height: 8px; }
 .transfer-meta { color: #7e94b6; white-space: nowrap; }
 .transfer-row.failed span:first-child { color: #ffb5ad; }
+
+/* Containers view (M10) */
+.container-list-view { display: flex; flex-direction: column; flex: 1; min-height: 0; gap: 8px; }
+.container-toolbar { display: flex; align-items: center; gap: 10px; }
+.container-toolbar label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #7e94b6; }
+.container-list { display: flex; flex-direction: column; gap: 3px; flex: 1; overflow-y: auto; border: 1px solid #263a53; border-radius: 10px; padding: 8px; background: #0d1522; }
+.container-row { display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 7px; font-size: 12px; color: #c9d7ea; }
+.container-row:hover { background: #16243a; }
+.container-id, .container-status { color: #7e94b6; font-family: monospace; font-size: 11px; }
+.container-name { min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.container-image { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9fb4d2; }
+.container-actions { display: flex; gap: 5px; }
+.state-badge { padding: 1px 8px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+.state-badge.running { background: #163c2b; color: #7fe0ae; }
+.state-badge.restarting { background: #43360f; color: #ffce6b; }
+.state-badge.paused { background: #142f4a; color: #8ec7ff; }
+.state-badge.exited { background: #222c3c; color: #93a4bd; }
+.state-badge.dead { background: #43191c; color: #ff9b95; }
+.state-badge.created { background: #1d2736; color: #aebdd4; }
+.container-summary { padding: 6px 12px 8px 30px; font-size: 11px; color: #8fa6c6; }
+.logs-drawer { display: flex; flex-direction: column; gap: 6px; border: 1px solid #2c4058; border-radius: 9px; padding: 8px 10px; background: #101b2c; max-height: 300px; }
+.logs-drawer-header { display: flex; align-items: center; gap: 10px; font-size: 12px; color: #c9d7ea; }
+.logs-drawer-header label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #7e94b6; }
+.logs-drawer-header strong { flex: 1; }
+.logs-drawer-body { margin: 0; overflow: auto; font-family: monospace; font-size: 11px; color: #a8bcd9; white-space: pre-wrap; word-break: break-all; max-height: 230px; }

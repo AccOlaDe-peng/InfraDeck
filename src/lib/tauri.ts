@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentRequest, AgentRunDto, AiConversation, AiMessage, AiProviderSettings, AiProviderSettingsInput, AppSettings, ApprovalGrant, AuditEvent, AuditQuery, AppErrorDto, BatchToolCall, BatchToolResponse, ConnectionDto, ConversationListQuery, ExecRequest, ExecResult, FileEntry, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalReadDto, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult, TransferJob, TransferRequest } from '../types/contracts';
+import type { AgentRequest, AgentRunDto, AiConversation, AiMessage, AiProviderSettings, AiProviderSettingsInput, AppSettings, ApprovalGrant, AuditEvent, AuditQuery, AppErrorDto, BatchToolCall, BatchToolResponse, ConnectionDto, ConversationListQuery, ExecRequest, ExecResult, FileEntry, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, Ss2sTransferRequest, TerminalReadDto, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult, TransferJob, TransferRequest } from '../types/contracts';
 
 export class AppError extends Error {
   readonly dto: AppErrorDto;
@@ -79,6 +79,9 @@ export const api = {
   fsRename: (connectionId: string, serverId: string, from: string, to: string) => call<void>('fs_rename', { connectionId, serverId, from, to }),
   fsDelete: (connectionId: string, serverId: string, path: string, recursive: boolean) => call<void>('fs_delete', { connectionId, serverId, path, recursive }),
   fsTransferStart: (request: TransferRequest) => call<TransferJob>('fs_transfer_start', { request }),
+  fsTransferPause: (transferId: string) => call<boolean>('fs_transfer_pause', { transferId }),
+  fsTransferResume: (transferId: string) => call<boolean>('fs_transfer_resume', { transferId }),
   fsTransferCancel: (transferId: string) => call<boolean>('fs_transfer_cancel', { transferId }),
   fsTransfersList: () => call<TransferJob[]>('fs_transfers_list'),
+  ss2sTransferStart: (request: Ss2sTransferRequest) => call<TransferJob>('ss2s_transfer_start', { request }),
 };

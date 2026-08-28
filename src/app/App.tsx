@@ -15,6 +15,7 @@ import CommandPalette, { type PaletteCommand } from './components/CommandPalette
 import ProfileForm from './components/ProfileForm';
 import AuditDrawer from './components/AuditDrawer';
 import FilesView from './components/FilesView';
+import ContainerListView from './components/containers/ContainerListView';
 
 type HostKeyPrompt = { serverId: string; host: string; port: number; algorithm: string; fingerprintSha256: string };
 
@@ -38,7 +39,7 @@ export default function App() {
 
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string>();
-  const [mainView, setMainView] = useState<'terminal' | 'files'>('terminal');
+  const [mainView, setMainView] = useState<'terminal' | 'files' | 'containers'>('terminal');
 
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string }>();
   const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt>();
@@ -474,13 +475,29 @@ export default function App() {
               disabled={mainView !== 'files' && !(() => { const active = selectedServer ?? connectedServers[0]; return Boolean(active && connections[active.id]?.state === 'connected'); })()}
               onClick={() => setMainView('files')}
             >文件</button>
+            <button
+              className={`tiny-button ${mainView === 'containers' ? 'active' : ''}`}
+              disabled={mainView !== 'containers' && !(() => { const active = selectedServer ?? connectedServers[0]; return Boolean(active && connections[active.id]?.state === 'connected'); })()}
+              onClick={() => setMainView('containers')}
+            >容器</button>
           </div>
           {(() => { const active = selectedServer ?? connectedServers[0]; const connected = active && connections[active.id]?.state === 'connected';
           return mainView === 'files' && connected ? (
             <FilesView
               server={selectedServer ?? connectedServers[0]}
               connection={connections[(selectedServer ?? connectedServers[0]).id]}
+              peers={connectedServers
+                .filter((item) => item.id !== (selectedServer ?? connectedServers[0]).id)
+                .map((item) => ({ server: item, connection: connections[item.id] }))}
               onNotify={notify}
+              onError={(text) => setBanner({ kind: 'error', text })}
+            />
+          ) : mainView === 'containers' && connected ? (
+            <ContainerListView
+              server={selectedServer ?? connectedServers[0]}
+              connection={connections[(selectedServer ?? connectedServers[0]).id]}
+              busy={busyServerId !== undefined}
+              onRunCommand={(command, containerId) => void runTool(command, containerId)}
               onError={(text) => setBanner({ kind: 'error', text })}
             />
           ) : (

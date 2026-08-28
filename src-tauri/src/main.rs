@@ -65,8 +65,11 @@ fn main() {
             commands::fs::fs_rename,
             commands::fs::fs_delete,
             commands::fs::fs_transfer_start,
+            commands::fs::fs_transfer_pause,
+            commands::fs::fs_transfer_resume,
             commands::fs::fs_transfer_cancel,
             commands::fs::fs_transfers_list,
+            commands::fs::ss2s_transfer_start,
         ])
         .run(tauri::generate_context!())
         .expect("error while running InfraDeck");
