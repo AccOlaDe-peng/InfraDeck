@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, AppError } from '../../lib/tauri';
+import { applyTheme, loadThemePreference, saveThemePreference, type ThemePreference } from '../../lib/theme';
 import type { AiProviderSettings, AppSettings, PermissionMode } from '../../types/contracts';
 
 const MODE_LABELS: Array<{ value: PermissionMode; label: string; hint: string }> = [
@@ -24,10 +25,12 @@ export default function SettingsDialog({ onClose, onNotify, onSettingsChanged, p
   const [maxIterations, setMaxIterations] = useState(provider?.maxToolIterations ?? 8);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('confirmChanges');
   const [conversationPersistence, setConversationPersistence] = useState(true);
+  const [theme, setTheme] = useState<ThemePreference>('dark');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
   useEffect(() => {
+    setTheme(loadThemePreference());
     void (async () => {
       try {
         const settings = await api.getAppSettings();
@@ -57,6 +60,12 @@ export default function SettingsDialog({ onClose, onNotify, onSettingsChanged, p
     }
   };
 
+  const changeTheme = (next: ThemePreference) => {
+    setTheme(next);
+    saveThemePreference(next);
+    applyTheme(next);
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form className="modal settings-modal" onClick={(event) => event.stopPropagation()} onSubmit={save}>
@@ -65,6 +74,15 @@ export default function SettingsDialog({ onClose, onNotify, onSettingsChanged, p
           <button className="tiny-button" type="button" onClick={onClose}>关闭</button>
         </div>
         {error && <div className="banner error">{error}</div>}
+        <p className="group-label">外观</p>
+        <label>颜色主题
+          <select value={theme} onChange={(event) => changeTheme(event.target.value as ThemePreference)}>
+            <option value="dark">深色</option>
+            <option value="light">浅色</option>
+            <option value="system">跟随系统</option>
+          </select>
+        </label>
+        <p className="form-note">主题仅保存在本机（浏览器存储），不影响远端配置。</p>
         <p className="group-label">AI Provider · OpenAI Compatible</p>
         <label>Base URL<input required value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} /></label>
         <div className="form-row">

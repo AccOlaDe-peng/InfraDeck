@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { api, AppError } from '../lib/tauri';
+import { loadThemePreference, watchTheme } from '../lib/theme';
 import { TOOL_COMMANDS, buildTarget, buildToolInput, promptResourceId, type ToolCommandMeta } from '../lib/commandMeta';
 import type {
   AgentRunDto, AiConversation, AiMessage, AiProviderSettings, ApprovalRequest, AppSettings,
@@ -40,6 +41,15 @@ export default function App() {
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string>();
   const [mainView, setMainView] = useState<'terminal' | 'files' | 'containers'>('terminal');
+  const [aiCollapsed, setAiCollapsed] = useState(() => localStorage.getItem('infradeck.aiCollapsed') === '1');
+
+  // Theme preference is device-local; `system` keeps following the OS live.
+  useEffect(() => watchTheme(loadThemePreference()), []);
+
+  const toggleAiPanel = (collapsed: boolean) => {
+    setAiCollapsed(collapsed);
+    localStorage.setItem('infradeck.aiCollapsed', collapsed ? '1' : '0');
+  };
 
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string }>();
   const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt>();
@@ -451,7 +461,7 @@ export default function App() {
         </section>
       )}
 
-      <div className="workspace-grid">
+      <div className={`workspace-grid ${aiCollapsed ? 'ai-collapsed' : ''}`}>
         <ServerSidebar
           profiles={profiles}
           connections={connections}
@@ -514,6 +524,16 @@ export default function App() {
           ); })()}
         </section>
 
+        {aiCollapsed ? (
+          <aside className="ai-rail">
+            <button
+              className="ai-rail-toggle"
+              title="展开 AI 助手"
+              onClick={() => toggleAiPanel(false)}
+            >AI ›</button>
+            {aiApproval && <span className="ai-rail-dot" title="有待审批的 AI 操作" />}
+          </aside>
+        ) : (
         <AiPanel
           servers={profiles}
           targetServerId={selectedServerId}
@@ -527,6 +547,7 @@ export default function App() {
           replay={aiReplay}
           streamingText={aiStreaming}
           onOpenAudit={() => setShowAudit(true)}
+          onCollapse={() => toggleAiPanel(true)}
           onConversationSelect={(id) => void selectConversation(id)}
           onConversationDelete={(id) => void deleteConversation(id)}
           onTargetChange={setSelectedServerId}
@@ -536,6 +557,7 @@ export default function App() {
           onCancel={() => void cancelAiRun()}
           onOpenSettings={() => setShowSettings(true)}
         />
+        )}
       </div>
 
       <footer>

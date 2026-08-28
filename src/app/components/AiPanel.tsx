@@ -20,6 +20,8 @@ interface Props {
   onOpenAudit: () => void;
   onConversationSelect: (conversationId: string) => void;
   onConversationDelete: (conversationId: string) => void;
+  /** Collapses the whole panel to the right-hand rail (dbx-style). */
+  onCollapse: () => void;
   aiConfigured: boolean;
 }
 
@@ -39,7 +41,10 @@ export default function AiPanel(props: Props) {
     <aside className="ai-panel">
       <div className="sidebar-heading">
         <p className="eyebrow">AI ASSISTANT</p>
-        {!props.aiConfigured && <button className="tiny-button connect" onClick={props.onOpenSettings}>配置</button>}
+        <span className="heading-actions">
+          {!props.aiConfigured && <button className="tiny-button connect" onClick={props.onOpenSettings}>配置</button>}
+          <button className="tiny-button" title="收起 AI 栏" onClick={props.onCollapse}>»</button>
+        </span>
       </div>
       <div className="ai-context">
         <span className={`environment ${target?.environment ?? 'unknown'}`}>
