@@ -426,8 +426,9 @@ Container { server_id: String, container_id: String }
 | §6.1 DOCKER_CLI_MISSING 检测 | 仅当 `exit≠0` 且 stderr 含 `not found` 时映射 `DOCKER_CLI_MISSING`（不可重试）；其余失败保持 `TOOL_EXEC_FAILED`（可重试） | 遥测与 shell 的 "command not found" 语义一致；"No such object" 等容器业务错误不误伤 |
 | §6.1 ps 行 name 归一化 | `Names` 数组取首个元素并 trim 前导 `/`；非 JSON 行跳过；空输出返回空列表 | docker `Names` 形如 `["/web"]` |
 | §6.1 docker.inspect 解析 | `docker inspect` 输出 JSON 数组，取首个 object 原样透出（含 `State`、`Config` 等） | adapter 不做字段白名单，保持与 CLI 一致 |
-| §6.2 UI | 仅 Quick Actions「容器」分组（docker.ps / docker.logs / docker.restart），容器 id 由 prompt 输入；「列表可展开行 + 行内 start/stop/logs」容器管理器回填为后续版本 | Quick Actions 与命令面板共享 `commandMeta` 元数据，改动面最小 |
+| §6.2 UI | 仅 Quick Actions「容器」分组（docker.ps / docker.start / docker.stop / docker.logs / docker.restart），容器 id 由 prompt 输入，`buildToolInput` 将 prompt 值合并进 `input.container`（target 记录 `containerId`）；「列表可展开行 + 行内 start/stop/logs」容器管理器回填为后续版本 | Quick Actions 与命令面板共享 `commandMeta` 元数据，改动面最小；后端 `validate_specific` 要求 container 必须在 input 中，故 UI 发起时统一合并 |
 | §6.3 QA 脚本 | `ScriptedExec` 新增 `Stderr { stderr, exit_code }` 变体以模拟 "command not found" | 原脚本只有 Stdout/Error，无法覆盖 stderr 检测路径 |
+| §7 contract 三源同步 | M8 漏加的 `transferRequestSchema` 与 `fs` error category 在收尾时补齐（含 schemas.test.ts 用例）；`appErrorSchema`/`AppErrorCategory` 增补 `fs` | 契约为唯一事实源，zod/TS 必须与 Rust `AppError::Fs` 与 `TransferRequest` 对齐 |
 
 ## 10. 任务顺序建议
 

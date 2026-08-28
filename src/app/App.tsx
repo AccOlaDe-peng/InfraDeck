@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { api, AppError } from '../lib/tauri';
-import { TOOL_COMMANDS, buildTarget, promptResourceId, type ToolCommandMeta } from '../lib/commandMeta';
+import { TOOL_COMMANDS, buildTarget, buildToolInput, promptResourceId, type ToolCommandMeta } from '../lib/commandMeta';
 import type {
   AgentRunDto, AiConversation, AiMessage, AiProviderSettings, ApprovalRequest, AppSettings,
   ConnectionDto, HealthCheckDto, ServerProfile, ToolResult,
@@ -252,7 +252,7 @@ export default function App() {
         id: crypto.randomUUID(),
         name: command.toolName,
         version: '1.0.0',
-        input: command.input,
+        input: buildToolInput(command, service),
         target: buildTarget(command, server.id, service),
         requestedAt: new Date().toISOString(),
       });
@@ -276,7 +276,7 @@ export default function App() {
           id: crypto.randomUUID(),
           name: command.toolName,
           version: '1.0.0',
-          input: command.input,
+          input: buildToolInput(command, service),
           target: buildTarget(command, server.id, service),
           requestedAt: new Date().toISOString(),
         })),

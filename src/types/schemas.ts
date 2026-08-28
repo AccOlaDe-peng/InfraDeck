@@ -51,6 +51,20 @@ export const auditQuerySchema = z.object({
   offset: z.number().int().min(0).optional(),
 });
 
+/**
+ * Aligned with the Rust `TransferRequest` (commands/fs.rs) validation:
+ * kind is upload|download, remotePath must be absolute and bounded, and
+ * overwrite defaults to false (uploads require it explicitly).
+ */
+export const transferRequestSchema = z.object({
+  kind: z.enum(['upload', 'download']),
+  serverId: z.string().min(1),
+  connectionId: z.string().min(1),
+  remotePath: z.string().startsWith('/', 'remotePath must be absolute').max(4096),
+  localPath: z.string().trim().min(1),
+  overwrite: z.boolean().optional(),
+});
+
 export const aiProviderSettingsInputSchema = z.object({
   providerKind: z.literal('openaiCompatible').optional(),
   baseUrl: z.string().trim().regex(/^https?:\/\//, 'baseUrl must start with http:// or https://'),

@@ -22,6 +22,8 @@ export const TOOL_COMMANDS: ToolCommandMeta[] = [
   { id: 'tool.ports', toolName: 'network.ports', title: '查看监听端口', group: 'Network', keywords: 'port 端口 listen', input: { protocol: 'all' }, targetKind: 'server' },
   { id: 'tool.service.status', toolName: 'service.status', title: '查看服务状态', group: 'Service', keywords: 'service systemd 状态', input: { service: 'nginx' }, targetKind: 'service' },
   { id: 'tool.docker.ps', toolName: 'docker.ps', title: '查看容器列表', group: 'Container', keywords: 'docker container ps 容器', input: {}, targetKind: 'server' },
+  { id: 'tool.docker.start', toolName: 'docker.start', title: '启动容器', group: 'Container', keywords: 'docker start 容器启动', input: {}, targetKind: 'container' },
+  { id: 'tool.docker.stop', toolName: 'docker.stop', title: '停止容器', group: 'Container', keywords: 'docker stop 容器停止', input: { timeout: 10 }, targetKind: 'container' },
   { id: 'tool.docker.logs', toolName: 'docker.logs', title: '查看容器日志', group: 'Container', keywords: 'docker logs 容器日志', input: { tail: 200 }, targetKind: 'container' },
   { id: 'tool.docker.restart', toolName: 'docker.restart', title: '重启容器', group: 'Container', keywords: 'docker restart 容器重启', input: { timeout: 10 }, targetKind: 'container' },
 ];
@@ -39,6 +41,13 @@ export function buildTarget(
     default:
       return { kind: 'server', serverId };
   }
+}
+
+/** Merges the prompted resource id into the input for container/service tool calls. */
+export function buildToolInput(command: ToolCommandMeta, resource: string): Record<string, unknown> {
+  if (command.targetKind === 'container') return { ...command.input, container: resource };
+  if (command.targetKind === 'service') return { ...command.input, service: resource };
+  return command.input;
 }
 
 /** Prompts for the resource id the command targets; server-level tools need none. */

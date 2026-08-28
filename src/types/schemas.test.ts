@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aiProviderSettingsInputSchema, appErrorSchema, auditQuerySchema, conversationListQuerySchema, serverProfileInputSchema } from './schemas';
+import { aiProviderSettingsInputSchema, appErrorSchema, auditQuerySchema, conversationListQuerySchema, serverProfileInputSchema, transferRequestSchema } from './schemas';
 
 describe('contract schemas', () => {
   it('accepts a server profile input', () => {
@@ -22,5 +22,16 @@ describe('contract schemas', () => {
   it('rejects invalid ai provider settings', () => {
     expect(aiProviderSettingsInputSchema.safeParse({ baseUrl: 'ftp://x', model: 'm' }).success).toBe(false);
     expect(aiProviderSettingsInputSchema.safeParse({ baseUrl: 'https://x', model: 'm', maxToolIterations: 99 }).success).toBe(false);
+  });
+  it('accepts a fs error category', () => {
+    expect(appErrorSchema.parse({ code: 'FS_EXISTS', message: 'exists', retryable: false, category: 'fs' }).category).toBe('fs');
+  });
+  it('validates a transfer request', () => {
+    const base = { kind: 'download', serverId: 'srv', connectionId: 'conn', remotePath: '/srv/data/file.log', localPath: '/tmp/file.log' };
+    expect(transferRequestSchema.parse(base).kind).toBe('download');
+    expect(transferRequestSchema.safeParse({ ...base, remotePath: 'relative/path' }).success).toBe(false);
+    expect(transferRequestSchema.safeParse({ ...base, localPath: '   ' }).success).toBe(false);
+    expect(transferRequestSchema.safeParse({ ...base, kind: 'sync' }).success).toBe(false);
+    expect(transferRequestSchema.parse({ ...base, overwrite: true }).overwrite).toBe(true);
   });
 });
