@@ -24,10 +24,15 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::{FileType, OpenFlags};
+
 use super::hostkey::fingerprint_sha256;
 use super::{
     ExecRequest, ExecResult, ProviderConnection, ProviderPty, PtyOptions, SshError, SshProvider,
 };
+use crate::fs::{mode_string, validate_remote_path, FileEntry, FsChunk, FtpError};
+
 use crate::{
     credentials::SecretValue,
     models::{AuthRef, ServerProfile},
@@ -118,6 +123,7 @@ pub struct RusshProvider {
     trust_store: Arc<HostKeyTrustStore>,
     sessions: Mutex<HashMap<String, Arc<client::Handle<Handler>>>>,
     ptys: Mutex<HashMap<String, PtyHandle>>,
+    sftp_sessions: Mutex<HashMap<String, Arc<SftpSession>>>,
 }
 
 /// Live terminal: half for writing, shared ring buffer fed by the reader task.
@@ -162,6 +168,60 @@ impl RusshProvider {
             trust_store,
             sessions: Mutex::new(HashMap::new()),
             ptys: Mutex::new(HashMap::new()),
+            sftp_sessions: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl RusshProvider {
+    fn map_sftp_error(error: impl std::fmt::Display) -> FtpError {
+        let message = error.to_string().to_ascii_lowercase();
+        if message.contains("no such file") || message.contains("not found") {
+            FtpError::NotFound
+        } else {
+            FtpError::Transfer(error.to_string())
+        }
+    }
+
+    async fn sftp_session(&self, connection_id: &str) -> Result<Arc<SftpSession>, FtpError> {
+        if let Some(session) = self.sftp_sessions.lock().await.get(connection_id) {
+            return Ok(Arc::clone(session));
+        }
+        let handle = self
+            .sessions
+            .lock()
+            .await
+            .get(connection_id)
+            .cloned()
+            .ok_or(FtpError::NotFound)?;
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|_| FtpError::Unsupported)?;
+        let session = SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|_| FtpError::Unsupported)?;
+        let session = Arc::new(session);
+        self.sftp_sessions
+            .lock()
+            .await
+            .insert(connection_id.to_string(), Arc::clone(&session));
+        Ok(session)
+    }
+
+    async fn delete_recursive(session: &SftpSession, path: &str) -> Result<(), FtpError> {
+        let metadata = session.metadata(path).await.map_err(Self::map_sftp_error)?;
+        if metadata.is_dir() {
+            let entries = session.read_dir(path).await.map_err(Self::map_sftp_error)?;
+            for entry in entries {
+                Box::pin(Self::delete_recursive(session, &entry.path())).await?;
+            }
+            session.remove_dir(path).await.map_err(Self::map_sftp_error)
+        } else {
+            session
+                .remove_file(path)
+                .await
+                .map_err(Self::map_sftp_error)
         }
     }
 }
@@ -437,6 +497,150 @@ impl SshProvider for RusshProvider {
             .await
             .map_err(|error| SshError::Provider(format!("pty close: {error}")))
     }
+
+    async fn fs_list(&self, connection_id: &str, path: &str) -> Result<Vec<FileEntry>, FtpError> {
+        validate_remote_path(path)?;
+        let session = self.sftp_session(connection_id).await?;
+        let entries = session
+            .read_dir(path)
+            .await
+            .map_err(Self::map_sftp_error)?
+            .map(|entry| {
+                let metadata = entry.metadata();
+                FileEntry {
+                    name: entry.file_name(),
+                    path: entry.path(),
+                    kind: fs_kind(metadata.file_type()),
+                    size: metadata.size.unwrap_or(0),
+                    mode: mode_string(metadata.permissions),
+                    owner_id: metadata.uid,
+                    group_id: metadata.gid,
+                    modified_at: mtime_string(metadata.mtime),
+                    symlink_target: None,
+                }
+            })
+            .collect();
+        Ok(entries)
+    }
+
+    async fn fs_stat(&self, connection_id: &str, path: &str) -> Result<FileEntry, FtpError> {
+        validate_remote_path(path)?;
+        let session = self.sftp_session(connection_id).await?;
+        let metadata = session.metadata(path).await.map_err(Self::map_sftp_error)?;
+        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+        Ok(FileEntry {
+            name: name.into(),
+            path: path.into(),
+            kind: fs_kind(metadata.file_type()),
+            size: metadata.size.unwrap_or(0),
+            mode: mode_string(metadata.permissions),
+            owner_id: metadata.uid,
+            group_id: metadata.gid,
+            modified_at: mtime_string(metadata.mtime),
+            symlink_target: None,
+        })
+    }
+
+    async fn fs_mkdir(&self, connection_id: &str, path: &str) -> Result<(), FtpError> {
+        validate_remote_path(path)?;
+        let session = self.sftp_session(connection_id).await?;
+        session.create_dir(path).await.map_err(Self::map_sftp_error)
+    }
+
+    async fn fs_rename(&self, connection_id: &str, from: &str, to: &str) -> Result<(), FtpError> {
+        validate_remote_path(from)?;
+        validate_remote_path(to)?;
+        let session = self.sftp_session(connection_id).await?;
+        session.rename(from, to).await.map_err(Self::map_sftp_error)
+    }
+
+    async fn fs_delete(
+        &self,
+        connection_id: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<(), FtpError> {
+        validate_remote_path(path)?;
+        let session = self.sftp_session(connection_id).await?;
+        if recursive {
+            Self::delete_recursive(&session, path).await
+        } else {
+            let metadata = session.metadata(path).await.map_err(Self::map_sftp_error)?;
+            if metadata.is_dir() {
+                session.remove_dir(path).await.map_err(Self::map_sftp_error)
+            } else {
+                session
+                    .remove_file(path)
+                    .await
+                    .map_err(Self::map_sftp_error)
+            }
+        }
+    }
+
+    async fn fs_read_range(
+        &self,
+        connection_id: &str,
+        path: &str,
+        offset: u64,
+        len: u32,
+    ) -> Result<FsChunk, FtpError> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        validate_remote_path(path)?;
+        let session = self.sftp_session(connection_id).await?;
+        let mut file = session.open(path).await.map_err(Self::map_sftp_error)?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|error| FtpError::Transfer(error.to_string()))?;
+        let mut buffer = vec![0u8; len as usize];
+        let mut read = 0usize;
+        while read < buffer.len() {
+            let chunk = file
+                .read(&mut buffer[read..])
+                .await
+                .map_err(|error| FtpError::Transfer(error.to_string()))?;
+            if chunk == 0 {
+                break;
+            }
+            read += chunk;
+        }
+        buffer.truncate(read);
+        Ok(FsChunk {
+            data: buffer,
+            eof: read < len as usize,
+        })
+    }
+
+    async fn fs_write_range(
+        &self,
+        connection_id: &str,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        truncate: bool,
+    ) -> Result<(), FtpError> {
+        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+        validate_remote_path(path)?;
+        let session = self.sftp_session(connection_id).await?;
+        let flags = if truncate && offset == 0 {
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE
+        } else {
+            OpenFlags::CREATE | OpenFlags::WRITE
+        };
+        let mut file = session
+            .open_with_flags(path, flags)
+            .await
+            .map_err(Self::map_sftp_error)?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|error| FtpError::Transfer(error.to_string()))?;
+        file.write_all(data)
+            .await
+            .map_err(|error| FtpError::Transfer(error.to_string()))?;
+        file.flush()
+            .await
+            .map_err(|error| FtpError::Transfer(error.to_string()))?;
+        Ok(())
+    }
 }
 
 fn append_limited(buffer: &mut Vec<u8>, bytes: &[u8], limit: usize) {
@@ -554,4 +758,23 @@ async fn authenticate_agent(
     Err(SshError::Provider(
         "SSH_AUTH_FAILED: unsupported platform".into(),
     ))
+}
+
+/// Maps SFTP file types onto the wire contract; unclassifiable nodes stay `other`.
+fn fs_kind(file_type: FileType) -> crate::fs::FileKind {
+    if file_type.is_dir() {
+        crate::fs::FileKind::Directory
+    } else if file_type.is_symlink() {
+        crate::fs::FileKind::Symlink
+    } else if file_type.is_file() {
+        crate::fs::FileKind::File
+    } else {
+        crate::fs::FileKind::Other
+    }
+}
+
+fn mtime_string(mtime: Option<u32>) -> Option<String> {
+    mtime
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds.into(), 0))
+        .map(|value| value.to_rfc3339())
 }

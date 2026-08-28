@@ -10,6 +10,7 @@ interface Props {
   conversations: AiConversation[];
   activeConversationId?: string;
   replay: AiMessage[];
+  streamingText: string;
   onTargetChange: (serverId: string) => void;
   onInput: (value: string) => void;
   onSend: () => void;
@@ -76,6 +77,7 @@ export default function AiPanel(props: Props) {
         ))}
         {props.run?.finalText && <p className="ai-final">{props.run.finalText}</p>}
         {props.run?.error && <p className="ai-run-error">{props.run.error.code}: {props.run.error.message}</p>}
+        {props.streamingText && <p className="ai-final ai-streaming">{props.streamingText}<span className="ai-cursor">▍</span></p>}
         {!props.run && props.replay.length > 0 && props.replay.map((message) => (
           message.role === 'tool'
             ? <div className="ai-step" key={message.id}><code className="ai-step-status success">工具</code><strong>{message.toolCallId ?? 'tool'}</strong><span>已回放</span></div>

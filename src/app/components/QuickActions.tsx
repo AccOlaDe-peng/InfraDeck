@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { TOOL_COMMANDS, type ToolCommandMeta } from '../../lib/commandMeta';
+import { TOOL_COMMANDS, promptResourceId, type ToolCommandMeta } from '../../lib/commandMeta';
 import type { ServerProfile } from '../../types/contracts';
 
 interface Props {
   server?: ServerProfile;
   connectedCount: number;
   busy: boolean;
-  onRun: (command: ToolCommandMeta, service: string, batch: boolean) => void;
+  onRun: (command: ToolCommandMeta, resource: string, batch: boolean) => void;
 }
 
 /** One-click structured tools above the terminal area, with an optional batch mode. */
@@ -14,20 +14,26 @@ export default function QuickActions({ server, connectedCount, busy, onRun }: Pr
   const [batch, setBatch] = useState(false);
   if (!server) return null;
   const run = (command: ToolCommandMeta) => {
-    let service = '';
-    if (command.targetKind === 'service') {
-      service = window.prompt('输入 systemd 服务名（例如 nginx）')?.trim() ?? '';
-      if (!service) return;
-    }
-    onRun(command, service, batch);
+    const resource = promptResourceId(command);
+    if (command.targetKind !== 'server' && !resource) return;
+    onRun(command, resource, batch);
   };
+  const groups = TOOL_COMMANDS.reduce<Record<string, ToolCommandMeta[]>>((acc, command) => {
+    (acc[command.group] ??= []).push(command);
+    return acc;
+  }, {});
   return (
     <div className="quick-actions">
       <span className="quick-label">快捷操作</span>
-      {TOOL_COMMANDS.map((command) => (
-        <button key={command.id} className="tiny-button" disabled={busy} onClick={() => run(command)}>
-          {command.title}
-        </button>
+      {Object.entries(groups).map(([group, commands]) => (
+        <span className="quick-group" key={group}>
+          <span className="quick-group-label">{group}</span>
+          {commands.map((command) => (
+            <button key={command.id} className="tiny-button" disabled={busy} onClick={() => run(command)}>
+              {command.title}
+            </button>
+          ))}
+        </span>
       ))}
       {connectedCount > 1 && (
         <label className="checkbox-row batch-toggle">

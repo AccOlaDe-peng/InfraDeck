@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { api, AppError } from '../lib/tauri';
-import { TOOL_COMMANDS, buildTarget, type ToolCommandMeta } from '../lib/commandMeta';
+import { TOOL_COMMANDS, buildTarget, promptResourceId, type ToolCommandMeta } from '../lib/commandMeta';
 import type {
   AgentRunDto, AiConversation, AiMessage, AiProviderSettings, ApprovalRequest, AppSettings,
   ConnectionDto, HealthCheckDto, ServerProfile, ToolResult,
@@ -13,6 +14,7 @@ import SettingsDialog from './components/SettingsDialog';
 import CommandPalette, { type PaletteCommand } from './components/CommandPalette';
 import ProfileForm from './components/ProfileForm';
 import AuditDrawer from './components/AuditDrawer';
+import FilesView from './components/FilesView';
 
 type HostKeyPrompt = { serverId: string; host: string; port: number; algorithm: string; fingerprintSha256: string };
 
@@ -36,6 +38,7 @@ export default function App() {
 
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string>();
+  const [mainView, setMainView] = useState<'terminal' | 'files'>('terminal');
 
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string }>();
   const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt>();
@@ -43,6 +46,8 @@ export default function App() {
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([]);
 
   const [aiRun, setAiRun] = useState<AgentRunDto>();
+  const [aiStreaming, setAiStreaming] = useState('');
+  const aiRunIdRef = useRef<string>();
   const [aiApproval, setAiApproval] = useState<ApprovalRequest>();
   const [aiInput, setAiInput] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
@@ -116,6 +121,23 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  useEffect(() => { aiRunIdRef.current = aiRun?.runId; }, [aiRun?.runId]);
+
+  // Streamed deltas arrive while agent_send is still awaiting its final DTO;
+  // ai.run.finished clears the bubble so the authoritative run state takes over.
+  useEffect(() => {
+    const unlisteners: Array<() => void> = [];
+    void (async () => {
+      unlisteners.push(await listen<{ runId: string; delta?: string }>('ai.message.delta', (event) => {
+        if (aiRunIdRef.current && event.payload.runId === aiRunIdRef.current && event.payload.delta) {
+          setAiStreaming((current) => current + event.payload.delta);
+        }
+      }));
+      unlisteners.push(await listen('ai.run.finished', () => setAiStreaming('')));
+    })();
+    return () => unlisteners.forEach((fn) => fn());
   }, []);
 
   // ---------------------------------------------------------------- servers
@@ -309,6 +331,7 @@ export default function App() {
     setAiApproval(undefined);
     try {
       const run = await api.agentSend({ serverId: selectedServerId, message: aiInput.trim(), ...(aiConversationId ? { conversationId: aiConversationId } : {}) });
+      setAiStreaming('');
       setAiRun(run);
       setAiReplay([]);
       void loadConversations(selectedServerId);
@@ -373,7 +396,7 @@ export default function App() {
   }, [profiles, connections]);
 
   const paletteToolCommands = useMemo(
-    () => TOOL_COMMANDS.map((meta) => ({ meta, run: () => void runTool(meta, meta.targetKind === 'service' ? window.prompt('输入服务名')?.trim() ?? '' : '') })),
+    () => TOOL_COMMANDS.map((meta) => ({ meta, run: () => void runTool(meta, promptResourceId(meta)) })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedServerId, connectedServers.length],
   );
@@ -444,16 +467,34 @@ export default function App() {
         <section className="workspace-main">
           <QuickActions server={selectedServer ?? connectedServers[0]} connectedCount={connectedServers.length} busy={busyServerId !== undefined} onRun={(command, service, batchMode) => void runTool(command, service, batchMode)} />
           {lastToolResult && <code className="exec-output tool-last">{lastToolResult.summary}</code>}
-          <TerminalTabs
-            tabs={tabs}
-            activeTabId={activeTabId}
-            profiles={profiles}
-            onSelect={setActiveTabId}
-            onClose={(tabId) => void closeTab(tabId)}
-            onRename={(tabId, title) => setTabs((current) => current.map((tab) => (tab.id === tabId ? { ...tab, title } : tab)))}
-            onReconnect={(tabId) => void reopenTerminal(tabId)}
-            onOpenTerminal={(server) => void openTerminalFor(server)}
-          />
+          <div className="view-switch">
+            <button className={`tiny-button ${mainView === 'terminal' ? 'active' : ''}`} onClick={() => setMainView('terminal')}>终端</button>
+            <button
+              className={`tiny-button ${mainView === 'files' ? 'active' : ''}`}
+              disabled={mainView !== 'files' && !(() => { const active = selectedServer ?? connectedServers[0]; return Boolean(active && connections[active.id]?.state === 'connected'); })()}
+              onClick={() => setMainView('files')}
+            >文件</button>
+          </div>
+          {(() => { const active = selectedServer ?? connectedServers[0]; const connected = active && connections[active.id]?.state === 'connected';
+          return mainView === 'files' && connected ? (
+            <FilesView
+              server={selectedServer ?? connectedServers[0]}
+              connection={connections[(selectedServer ?? connectedServers[0]).id]}
+              onNotify={notify}
+              onError={(text) => setBanner({ kind: 'error', text })}
+            />
+          ) : (
+            <TerminalTabs
+              tabs={tabs}
+              activeTabId={activeTabId}
+              profiles={profiles}
+              onSelect={setActiveTabId}
+              onClose={(tabId) => void closeTab(tabId)}
+              onRename={(tabId, title) => setTabs((current) => current.map((tab) => (tab.id === tabId ? { ...tab, title } : tab)))}
+              onReconnect={(tabId) => void reopenTerminal(tabId)}
+              onOpenTerminal={(server) => void openTerminalFor(server)}
+            />
+          ); })()}
         </section>
 
         <AiPanel
@@ -467,6 +508,7 @@ export default function App() {
           conversations={aiConversations}
           activeConversationId={aiConversationId}
           replay={aiReplay}
+          streamingText={aiStreaming}
           onOpenAudit={() => setShowAudit(true)}
           onConversationSelect={(id) => void selectConversation(id)}
           onConversationDelete={(id) => void deleteConversation(id)}

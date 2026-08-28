@@ -20,6 +20,8 @@ pub enum AppError {
     Ssh(String),
     #[error("ai error: {0}")]
     Ai(String),
+    #[error("{message}")]
+    Fs { code: String, message: String },
     #[error("SSH host key verification required")]
     SshHostKeyRequired {
         host: String,
@@ -78,6 +80,11 @@ impl AppError {
             Self::CredentialNotFound => ("CREDENTIAL_NOT_FOUND", "credential", false),
             Self::Ssh(_) => ("SSH_ERROR", "ssh", true),
             Self::Ai(_) => ("AI_PROVIDER_ERROR", "ai", true),
+            Self::Fs { code, .. } => (
+                code.as_str(),
+                "fs",
+                matches!(code.as_str(), "FS_TRANSFER_FAILED"),
+            ),
             Self::SshHostKeyRequired { .. } => ("SSH_HOST_KEY_REQUIRED", "ssh", false),
         };
         let details = match self {

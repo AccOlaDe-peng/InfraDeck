@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentRequest, AgentRunDto, AiConversation, AiMessage, AiProviderSettings, AiProviderSettingsInput, AppSettings, ApprovalGrant, AuditEvent, AuditQuery, AppErrorDto, BatchToolCall, BatchToolResponse, ConnectionDto, ConversationListQuery, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalReadDto, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult } from '../types/contracts';
+import type { AgentRequest, AgentRunDto, AiConversation, AiMessage, AiProviderSettings, AiProviderSettingsInput, AppSettings, ApprovalGrant, AuditEvent, AuditQuery, AppErrorDto, BatchToolCall, BatchToolResponse, ConnectionDto, ConversationListQuery, ExecRequest, ExecResult, FileEntry, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalReadDto, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult, TransferJob, TransferRequest } from '../types/contracts';
 
 export class AppError extends Error {
   readonly dto: AppErrorDto;
@@ -73,4 +73,12 @@ export const api = {
     call<AiMessage[]>('ai_messages_list', { conversationId, limit, offset }),
   deleteConversation: (conversationId: string) => call<boolean>('ai_conversation_delete', { conversationId }),
   queryAuditEvents: (query: AuditQuery) => call<AuditEvent[]>('audit_events_query', { query }),
+  fsList: (connectionId: string, path: string) => call<FileEntry[]>('fs_list', { connectionId, path }),
+  fsStat: (connectionId: string, path: string) => call<FileEntry>('fs_stat', { connectionId, path }),
+  fsMkdir: (connectionId: string, serverId: string, path: string) => call<void>('fs_mkdir', { connectionId, serverId, path }),
+  fsRename: (connectionId: string, serverId: string, from: string, to: string) => call<void>('fs_rename', { connectionId, serverId, from, to }),
+  fsDelete: (connectionId: string, serverId: string, path: string, recursive: boolean) => call<void>('fs_delete', { connectionId, serverId, path, recursive }),
+  fsTransferStart: (request: TransferRequest) => call<TransferJob>('fs_transfer_start', { request }),
+  fsTransferCancel: (transferId: string) => call<boolean>('fs_transfer_cancel', { transferId }),
+  fsTransfersList: () => call<TransferJob[]>('fs_transfers_list'),
 };

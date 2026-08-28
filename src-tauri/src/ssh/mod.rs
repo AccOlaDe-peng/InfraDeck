@@ -6,7 +6,11 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{credentials::SecretValue, models::ServerProfile};
+use crate::{
+    credentials::SecretValue,
+    fs::{mode_string, validate_remote_path, FileEntry, FileKind, FsChunk, FtpError},
+    models::ServerProfile,
+};
 
 pub mod hostkey;
 pub mod real;
@@ -155,6 +159,31 @@ pub trait SshProvider: Send + Sync {
     /// Drains buffered PTY output accumulated since the last call.
     async fn pty_take_output(&self, pty_id: &str) -> Result<PtyChunk, SshError>;
     async fn pty_close(&self, pty_id: &str) -> Result<(), SshError>;
+    async fn fs_list(&self, connection_id: &str, path: &str) -> Result<Vec<FileEntry>, FtpError>;
+    async fn fs_stat(&self, connection_id: &str, path: &str) -> Result<FileEntry, FtpError>;
+    async fn fs_mkdir(&self, connection_id: &str, path: &str) -> Result<(), FtpError>;
+    async fn fs_rename(&self, connection_id: &str, from: &str, to: &str) -> Result<(), FtpError>;
+    async fn fs_delete(
+        &self,
+        connection_id: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<(), FtpError>;
+    async fn fs_read_range(
+        &self,
+        connection_id: &str,
+        path: &str,
+        offset: u64,
+        len: u32,
+    ) -> Result<FsChunk, FtpError>;
+    async fn fs_write_range(
+        &self,
+        connection_id: &str,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        truncate: bool,
+    ) -> Result<(), FtpError>;
 }
 
 #[async_trait]
@@ -198,11 +227,64 @@ impl<T: SshProvider + ?Sized> SshProvider for Box<T> {
     async fn pty_close(&self, pty_id: &str) -> Result<(), SshError> {
         self.as_ref().pty_close(pty_id).await
     }
+    async fn fs_list(&self, connection_id: &str, path: &str) -> Result<Vec<FileEntry>, FtpError> {
+        self.as_ref().fs_list(connection_id, path).await
+    }
+    async fn fs_stat(&self, connection_id: &str, path: &str) -> Result<FileEntry, FtpError> {
+        self.as_ref().fs_stat(connection_id, path).await
+    }
+    async fn fs_mkdir(&self, connection_id: &str, path: &str) -> Result<(), FtpError> {
+        self.as_ref().fs_mkdir(connection_id, path).await
+    }
+    async fn fs_rename(&self, connection_id: &str, from: &str, to: &str) -> Result<(), FtpError> {
+        self.as_ref().fs_rename(connection_id, from, to).await
+    }
+    async fn fs_delete(
+        &self,
+        connection_id: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<(), FtpError> {
+        self.as_ref()
+            .fs_delete(connection_id, path, recursive)
+            .await
+    }
+    async fn fs_read_range(
+        &self,
+        connection_id: &str,
+        path: &str,
+        offset: u64,
+        len: u32,
+    ) -> Result<FsChunk, FtpError> {
+        self.as_ref()
+            .fs_read_range(connection_id, path, offset, len)
+            .await
+    }
+    async fn fs_write_range(
+        &self,
+        connection_id: &str,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        truncate: bool,
+    ) -> Result<(), FtpError> {
+        self.as_ref()
+            .fs_write_range(connection_id, path, offset, data, truncate)
+            .await
+    }
 }
 
 #[derive(Default)]
 pub struct MockSshProvider {
     ptys: Mutex<HashMap<String, MockPty>>,
+    files: Mutex<HashMap<String, MockFile>>,
+}
+
+#[derive(Clone)]
+pub struct MockFile {
+    pub kind: FileKind,
+    pub content: Vec<u8>,
+    pub size: u64,
 }
 
 #[derive(Default)]
@@ -322,6 +404,162 @@ impl SshProvider for MockSshProvider {
         pty.closed = true;
         Ok(())
     }
+
+    async fn fs_list(&self, _connection_id: &str, path: &str) -> Result<Vec<FileEntry>, FtpError> {
+        validate_remote_path(path)?;
+        let files = self.files.lock().await;
+        let prefix = format!("{}/", path.trim_end_matches('/'));
+        let mut entries: Vec<FileEntry> = files
+            .iter()
+            .filter(|(entry_path, _)| {
+                let candidate = entry_path.trim_end_matches('/');
+                candidate.starts_with(&prefix) && !candidate[prefix.len()..].contains('/')
+            })
+            .map(|(entry_path, file)| FileEntry {
+                name: entry_path
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .into(),
+                path: entry_path.clone(),
+                kind: file.kind,
+                size: file.size,
+                mode: "0644".into(),
+                owner_id: Some(0),
+                group_id: Some(0),
+                modified_at: None,
+                symlink_target: None,
+            })
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(entries)
+    }
+
+    async fn fs_stat(&self, _connection_id: &str, path: &str) -> Result<FileEntry, FtpError> {
+        validate_remote_path(path)?;
+        let files = self.files.lock().await;
+        files
+            .get(path.trim_end_matches('/'))
+            .map(|file| FileEntry {
+                name: path
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .into(),
+                path: path.into(),
+                kind: file.kind,
+                size: file.size,
+                mode: mode_string(Some(0o644)),
+                owner_id: Some(0),
+                group_id: Some(0),
+                modified_at: None,
+                symlink_target: None,
+            })
+            .ok_or(FtpError::NotFound)
+    }
+
+    async fn fs_mkdir(&self, _connection_id: &str, path: &str) -> Result<(), FtpError> {
+        validate_remote_path(path)?;
+        self.files.lock().await.insert(
+            path.trim_end_matches('/').into(),
+            MockFile {
+                kind: FileKind::Directory,
+                content: Vec::new(),
+                size: 0,
+            },
+        );
+        Ok(())
+    }
+
+    async fn fs_rename(&self, _connection_id: &str, from: &str, to: &str) -> Result<(), FtpError> {
+        validate_remote_path(from)?;
+        validate_remote_path(to)?;
+        let mut files = self.files.lock().await;
+        let file = files
+            .remove(from.trim_end_matches('/'))
+            .ok_or(FtpError::NotFound)?;
+        files.insert(to.trim_end_matches('/').into(), file);
+        Ok(())
+    }
+
+    async fn fs_delete(
+        &self,
+        _connection_id: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<(), FtpError> {
+        validate_remote_path(path)?;
+        let normalized = path.trim_end_matches('/').to_string();
+        let mut files = self.files.lock().await;
+        if files.remove(&normalized).is_none() {
+            return Err(FtpError::NotFound);
+        }
+        if recursive {
+            let prefix = format!("{normalized}/");
+            let victims: Vec<String> = files
+                .keys()
+                .filter(|candidate| candidate.starts_with(&prefix))
+                .cloned()
+                .collect();
+            for victim in victims {
+                files.remove(&victim);
+            }
+        }
+        Ok(())
+    }
+
+    async fn fs_read_range(
+        &self,
+        _connection_id: &str,
+        path: &str,
+        offset: u64,
+        len: u32,
+    ) -> Result<FsChunk, FtpError> {
+        validate_remote_path(path)?;
+        let files = self.files.lock().await;
+        let file = files.get(path).ok_or(FtpError::NotFound)?;
+        if offset > file.content.len() as u64 {
+            return Ok(FsChunk {
+                data: Vec::new(),
+                eof: true,
+            });
+        }
+        let start = offset as usize;
+        let end = (offset as usize + len as usize).min(file.content.len());
+        Ok(FsChunk {
+            data: file.content[start..end].to_vec(),
+            eof: end >= file.content.len(),
+        })
+    }
+
+    async fn fs_write_range(
+        &self,
+        _connection_id: &str,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        truncate: bool,
+    ) -> Result<(), FtpError> {
+        validate_remote_path(path)?;
+        let mut files = self.files.lock().await;
+        let file = files.entry(path.into()).or_insert_with(|| MockFile {
+            kind: FileKind::File,
+            content: Vec::new(),
+            size: 0,
+        });
+        if truncate && offset == 0 {
+            file.content.clear();
+        }
+        let required = offset as usize + data.len();
+        if file.content.len() < required {
+            file.content.resize(required, 0);
+        }
+        file.content[offset as usize..required].copy_from_slice(data);
+        file.size = file.content.len() as u64;
+        Ok(())
+    }
 }
 
 pub fn can_transition(from: ConnectionState, to: ConnectionState) -> bool {
@@ -425,6 +663,61 @@ impl<P: SshProvider> SshManager<P> {
                 .ok_or(SshError::ConnectionNotFound)?
         };
         self.provider.pty_close(&pty_id).await
+    }
+
+    pub async fn fs_list(
+        &self,
+        connection_id: &str,
+        path: &str,
+    ) -> Result<Vec<FileEntry>, FtpError> {
+        self.provider.fs_list(connection_id, path).await
+    }
+    pub async fn fs_stat(&self, connection_id: &str, path: &str) -> Result<FileEntry, FtpError> {
+        self.provider.fs_stat(connection_id, path).await
+    }
+    pub async fn fs_mkdir(&self, connection_id: &str, path: &str) -> Result<(), FtpError> {
+        self.provider.fs_mkdir(connection_id, path).await
+    }
+    pub async fn fs_rename(
+        &self,
+        connection_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<(), FtpError> {
+        self.provider.fs_rename(connection_id, from, to).await
+    }
+    pub async fn fs_delete(
+        &self,
+        connection_id: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<(), FtpError> {
+        self.provider
+            .fs_delete(connection_id, path, recursive)
+            .await
+    }
+    pub async fn fs_read_range(
+        &self,
+        connection_id: &str,
+        path: &str,
+        offset: u64,
+        len: u32,
+    ) -> Result<FsChunk, FtpError> {
+        self.provider
+            .fs_read_range(connection_id, path, offset, len)
+            .await
+    }
+    pub async fn fs_write_range(
+        &self,
+        connection_id: &str,
+        path: &str,
+        offset: u64,
+        data: &[u8],
+        truncate: bool,
+    ) -> Result<(), FtpError> {
+        self.provider
+            .fs_write_range(connection_id, path, offset, data, truncate)
+            .await
     }
 
     /// Closes and forgets every terminal session owned by `connection_id`.
@@ -838,6 +1131,73 @@ mod tests {
             .await
             .expect("close");
         assert!(manager.terminal_read(&session.session_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_filesystem_round_trip() {
+        let manager = SshManager::new(MockSshProvider::default());
+        manager.fs_mkdir("conn", "/srv/data").await.expect("mkdir");
+        manager
+            .fs_write_range("conn", "/srv/data/file.bin", 0, b"hello sftp world", true)
+            .await
+            .expect("write");
+        // Chunked overwrite at an offset, no truncate.
+        manager
+            .fs_write_range("conn", "/srv/data/file.bin", 6, b"SFTP", false)
+            .await
+            .expect("patch");
+
+        let stat = manager
+            .fs_stat("conn", "/srv/data/file.bin")
+            .await
+            .expect("stat");
+        assert_eq!(stat.kind, FileKind::File);
+        assert_eq!(stat.size, 16);
+
+        let chunk = manager
+            .fs_read_range("conn", "/srv/data/file.bin", 0, 32)
+            .await
+            .expect("read");
+        assert_eq!(chunk.data, b"hello SFTP world");
+        assert!(chunk.eof);
+
+        let mid = manager
+            .fs_read_range("conn", "/srv/data/file.bin", 6, 4)
+            .await
+            .expect("mid read");
+        assert_eq!(mid.data, b"SFTP");
+        assert!(!mid.eof);
+
+        let listing = manager.fs_list("conn", "/srv/data").await.expect("list");
+        assert_eq!(listing.len(), 1);
+        assert_eq!(listing[0].name, "file.bin");
+
+        assert!(matches!(
+            manager.fs_stat("conn", "/../escape").await,
+            Err(FtpError::PathInvalid)
+        ));
+        assert!(matches!(
+            manager.fs_read_range("conn", "/missing", 0, 10).await,
+            Err(FtpError::NotFound)
+        ));
+
+        manager
+            .fs_rename("conn", "/srv/data/file.bin", "/srv/data/renamed.bin")
+            .await
+            .expect("rename");
+        manager
+            .fs_delete("conn", "/srv/data", true)
+            .await
+            .expect("recursive delete removes children and the directory");
+        assert!(manager
+            .fs_list("conn", "/srv/data")
+            .await
+            .expect("empty")
+            .is_empty());
+        assert!(matches!(
+            manager.fs_stat("conn", "/srv/data/renamed.bin").await,
+            Err(FtpError::NotFound)
+        ));
     }
 
     #[tokio::test]

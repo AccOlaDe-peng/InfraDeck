@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod credentials;
 mod error;
+mod fs;
 mod models;
 mod platform;
 mod policy;
@@ -58,6 +59,14 @@ fn main() {
             commands::ai::ai_conversations_list,
             commands::ai::ai_messages_list,
             commands::ai::ai_conversation_delete,
+            commands::fs::fs_list,
+            commands::fs::fs_stat,
+            commands::fs::fs_mkdir,
+            commands::fs::fs_rename,
+            commands::fs::fs_delete,
+            commands::fs::fs_transfer_start,
+            commands::fs::fs_transfer_cancel,
+            commands::fs::fs_transfers_list,
         ])
         .run(tauri::generate_context!())
         .expect("error while running InfraDeck");

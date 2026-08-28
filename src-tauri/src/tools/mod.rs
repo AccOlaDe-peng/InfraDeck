@@ -50,9 +50,21 @@ pub struct ToolCall {
     rename_all_fields = "camelCase"
 )]
 pub enum ResourceTarget {
-    Server { server_id: String },
-    Service { server_id: String, service: String },
-    Process { server_id: String, pid: i64 },
+    Server {
+        server_id: String,
+    },
+    Service {
+        server_id: String,
+        service: String,
+    },
+    Process {
+        server_id: String,
+        pid: i64,
+    },
+    Container {
+        server_id: String,
+        container_id: String,
+    },
 }
 
 impl ResourceTarget {
@@ -60,7 +72,8 @@ impl ResourceTarget {
         match self {
             Self::Server { server_id }
             | Self::Service { server_id, .. }
-            | Self::Process { server_id, .. } => server_id,
+            | Self::Process { server_id, .. }
+            | Self::Container { server_id, .. } => server_id,
         }
     }
     pub fn label(&self) -> String {
@@ -68,6 +81,10 @@ impl ResourceTarget {
             Self::Server { server_id } => server_id.clone(),
             Self::Service { server_id, service } => format!("{server_id}/{service}"),
             Self::Process { server_id, pid } => format!("{server_id}/pid:{pid}"),
+            Self::Container {
+                server_id,
+                container_id,
+            } => format!("{server_id}/container:{container_id}"),
         }
     }
 }
@@ -239,6 +256,91 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 &["command", "timeoutMs", "purpose"],
             ),
         ),
+        definition(
+            "docker.ps",
+            "List Docker containers",
+            false,
+            "safe",
+            15_000,
+            object_schema(serde_json::json!({"all":{"type":"boolean"}}), &[]),
+        ),
+        definition(
+            "docker.inspect",
+            "Inspect a Docker container",
+            false,
+            "safe",
+            15_000,
+            object_schema(
+                serde_json::json!({"container":{"type":"string","minLength":12,"maxLength":64,"pattern":"^[a-zA-Z0-9]+$"}}),
+                &["container"],
+            ),
+        ),
+        definition(
+            "docker.logs",
+            "Read Docker container logs",
+            false,
+            "safe",
+            15_000,
+            object_schema(
+                serde_json::json!({"container":{"type":"string","minLength":12,"maxLength":64,"pattern":"^[a-zA-Z0-9]+$"},"tail":{"type":"integer","minimum":1,"maximum":5000},"sinceMinutes":{"type":"integer","minimum":1,"maximum":10080}}),
+                &["container"],
+            ),
+        ),
+        definition(
+            "docker.stats",
+            "Sample Docker container resource usage",
+            false,
+            "safe",
+            20_000,
+            object_schema(
+                serde_json::json!({"container":{"type":"string","minLength":12,"maxLength":64,"pattern":"^[a-zA-Z0-9]+$"}}),
+                &["container"],
+            ),
+        ),
+        definition(
+            "docker.start",
+            "Start a Docker container",
+            true,
+            "caution",
+            30_000,
+            object_schema(
+                serde_json::json!({"container":{"type":"string","minLength":12,"maxLength":64,"pattern":"^[a-zA-Z0-9]+$"}}),
+                &["container"],
+            ),
+        ),
+        definition(
+            "docker.stop",
+            "Stop a Docker container",
+            true,
+            "caution",
+            30_000,
+            object_schema(
+                serde_json::json!({"container":{"type":"string","minLength":12,"maxLength":64,"pattern":"^[a-zA-Z0-9]+$"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),
+                &["container"],
+            ),
+        ),
+        definition(
+            "docker.restart",
+            "Restart a Docker container",
+            true,
+            "caution",
+            30_000,
+            object_schema(
+                serde_json::json!({"container":{"type":"string","minLength":12,"maxLength":64,"pattern":"^[a-zA-Z0-9]+$"},"timeout":{"type":"integer","minimum":1,"maximum":120}}),
+                &["container"],
+            ),
+        ),
+        definition(
+            "docker.execute",
+            "Execute a command inside a Docker container",
+            true,
+            "high",
+            300_000,
+            object_schema(
+                serde_json::json!({"container":{"type":"string","minLength":12,"maxLength":64,"pattern":"^[a-zA-Z0-9]+$"},"command":{"type":"string","minLength":1,"maxLength":32768},"timeoutMs":{"type":"integer","minimum":1000,"maximum":300000}}),
+                &["container", "command", "timeoutMs"],
+            ),
+        ),
     ]
 }
 
@@ -369,6 +471,36 @@ fn validate_specific(call: &ToolCall) -> Result<(), String> {
                 return Err("timeout out of range".into());
             }
         }
+        "docker.inspect" | "docker.logs" | "docker.stats" | "docker.start" | "docker.stop"
+        | "docker.restart" | "docker.execute" => {
+            let container = input
+                .get("container")
+                .and_then(Value::as_str)
+                .ok_or("container is required")?;
+            if !valid_container_id(container) {
+                return Err("invalid container id".into());
+            }
+            if !matches!(&call.target,ResourceTarget::Container{container_id:target,..} if target==container)
+            {
+                return Err("target container mismatch".into());
+            }
+            if call.name == "docker.execute" {
+                let timeout = input
+                    .get("timeoutMs")
+                    .and_then(Value::as_u64)
+                    .ok_or("timeoutMs is required")?;
+                if !(1000..=300000).contains(&timeout) {
+                    return Err("timeout out of range".into());
+                }
+            }
+            if call.name == "docker.logs" {
+                if let Some(tail) = input.get("tail").and_then(Value::as_i64) {
+                    if !(1..=5000).contains(&tail) {
+                        return Err("tail out of range".into());
+                    }
+                }
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -379,6 +511,22 @@ fn valid_service(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"@_.:-".contains(&b))
+}
+fn valid_container_id(value: &str) -> bool {
+    (12..=64).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+fn is_docker_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "docker.ps"
+            | "docker.inspect"
+            | "docker.logs"
+            | "docker.stats"
+            | "docker.start"
+            | "docker.stop"
+            | "docker.restart"
+            | "docker.execute"
+    )
 }
 pub fn arguments_digest(call: &ToolCall) -> String {
     format!(
@@ -438,14 +586,14 @@ pub async fn execute<P: SshProvider>(
         }
     };
     if exec.exit_code.unwrap_or(1) != 0 {
-        return failed(
-            call,
-            audit_id,
-            started_at,
-            timer,
-            "TOOL_EXEC_FAILED",
-            "远程命令执行失败",
-        );
+        let (code, message) = if is_docker_tool(&call.name)
+            && exec.stderr.to_ascii_lowercase().contains("not found")
+        {
+            ("DOCKER_CLI_MISSING", "远端无 docker 命令")
+        } else {
+            ("TOOL_EXEC_FAILED", "远程命令执行失败")
+        };
+        return failed(call, audit_id, started_at, timer, code, message);
     }
     let parsed = match parse_output(call, &exec.stdout) {
         Ok(value) => value,
@@ -465,9 +613,15 @@ pub async fn execute<P: SshProvider>(
     } else {
         Vec::new()
     };
-    let restart_verified = call.name != "service.restart"
-        || (parsed["activeState"] == "active"
-            && matches!(parsed["subState"].as_str(), Some("running" | "exited")));
+    let restart_verified = match call.name.as_str() {
+        "service.restart" => {
+            parsed["activeState"] == "active"
+                && matches!(parsed["subState"].as_str(), Some("running" | "exited"))
+        }
+        "docker.start" | "docker.restart" => parsed["running"] == true,
+        "docker.stop" => parsed["running"] == false,
+        _ => true,
+    };
     let status = if restart_verified {
         "success"
     } else {
@@ -475,6 +629,8 @@ pub async fn execute<P: SshProvider>(
     };
     let warnings = if restart_verified {
         Vec::new()
+    } else if call.name.starts_with("docker.") {
+        vec!["容器状态验证未通过：期望运行状态与 inspect 结果不一致".into()]
     } else {
         vec!["服务重启命令成功，但运行状态验证未通过".into()]
     };
@@ -509,6 +665,11 @@ fn build_request(call: &ToolCall, default_timeout: u64) -> Result<ExecRequest, S
             .and_then(Value::as_str)
             .ok_or_else(|| "service is required".to_string())
     };
+    let container = || {
+        value("container")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "container is required".to_string())
+    };
     let command = match call.name.as_str() {
         "server.info" => "hostname; uname -s; uname -r; uname -m; awk -F= '$1==\"NAME\"||$1==\"VERSION_ID\"{gsub(/\"/,\"\",$2);print $1\"=\"$2}' /etc/os-release 2>/dev/null; awk '{print \"UPTIME=\"int($1)}' /proc/uptime 2>/dev/null".into(),
         "system.memory" => "cat /proc/meminfo".into(),
@@ -520,6 +681,38 @@ fn build_request(call: &ToolCall, default_timeout: u64) -> Result<ExecRequest, S
         "service.logs" => { let lines=value("lines").and_then(Value::as_u64).unwrap_or(100); let since=value("sinceMinutes").and_then(Value::as_u64).map(|v|format!(" --since '-{v} minutes'")).unwrap_or_default(); format!("journalctl --no-pager -o short-iso-precise -n {lines} -u {}{since}",shell_escape(&unit_name(service()?))) },
         "service.restart" => format!("systemctl show --no-page --property=LoadState,ActiveState,SubState,MainPID,UnitFileState,Description -- {0}; printf '\n__INFRADECK_RESTART__\n'; if [ \"$(id -u)\" -eq 0 ]; then systemctl restart -- {0}; else sudo -n systemctl restart -- {0}; fi && sleep 0.5 && systemctl show --no-page --property=LoadState,ActiveState,SubState,MainPID,UnitFileState,Description -- {0}", shell_escape(&unit_name(service()?))),
         "shell.execute" => value("command").and_then(Value::as_str).ok_or("command is required")?.to_string(),
+        "docker.ps" => format!(
+            "docker ps {}--format '{{{{json .}}}}'",
+            if value("all").and_then(Value::as_bool).unwrap_or(false) {
+                "-a "
+            } else {
+                ""
+            }
+        ),
+        "docker.inspect" => format!("docker inspect {}", shell_escape(container()?)),
+        "docker.logs" => {
+            let tail = value("tail").and_then(Value::as_u64).unwrap_or(200);
+            let since = value("sinceMinutes").and_then(Value::as_u64).map(|v| format!(" --since '{v}m'")).unwrap_or_default();
+            format!("docker logs --tail {tail}{since} {}", shell_escape(container()?))
+        }
+        "docker.stats" => format!("docker stats --no-stream --format '{{{{json .}}}}' {}", shell_escape(container()?)),
+        "docker.start" => format!(
+            "docker start {0}; status=$?; printf '\\n__INFRADECK_RESTART__\\n'; docker inspect --format '{{{{json .State}}}}' {0} 2>/dev/null; exit $status",
+            shell_escape(container()?)
+        ),
+        "docker.stop" | "docker.restart" => {
+            let verb = if call.name == "docker.stop" { "stop" } else { "restart" };
+            let timeout = value("timeout").and_then(Value::as_u64).unwrap_or(10);
+            format!(
+                "docker {verb} -t {timeout} {0}; status=$?; printf '\\n__INFRADECK_RESTART__\\n'; docker inspect --format '{{{{json .State}}}}' {0} 2>/dev/null; exit $status",
+                shell_escape(container()?)
+            )
+        }
+        "docker.execute" => format!(
+            "docker exec {} sh -c {}",
+            shell_escape(container()?),
+            shell_escape(value("command").and_then(Value::as_str).ok_or("command is required")?)
+        ),
         _ => return Err("unknown tool".into()),
     };
     Ok(ExecRequest {
@@ -559,6 +752,13 @@ fn parse_output(call: &ToolCall, stdout: &str) -> Result<Value, String> {
         "shell.execute" => Ok(
             serde_json::json!({"completed":true,"outputDigest":format!("{:x}",Sha256::digest(stdout.as_bytes()))}),
         ),
+        "docker.ps" => parse_docker_ps(stdout),
+        "docker.inspect" => parse_docker_inspect(stdout),
+        "docker.logs" => Ok(
+            serde_json::json!({"container":call.input["container"],"entries":stdout.lines().take(5000).map(|line|serde_json::json!({"message":redact(line)})).collect::<Vec<_>>()}),
+        ),
+        "docker.stats" => parse_docker_stats(stdout),
+        "docker.start" | "docker.stop" | "docker.restart" => parse_docker_lifecycle(stdout, call),
         _ => Err("unsupported parser".into()),
     }
 }
@@ -703,6 +903,69 @@ fn parse_service(s: &str, call: &ToolCall) -> Result<Value, String> {
         serde_json::json!({"service":call.input["service"],"loadState":m.get("LoadState").copied().unwrap_or("unknown"),"activeState":m.get("ActiveState").copied().unwrap_or("unknown"),"subState":m.get("SubState").copied().unwrap_or("unknown"),"mainPid":m.get("MainPID").and_then(|v|v.parse::<u64>().ok()),"unitFileState":m.get("UnitFileState"),"description":m.get("Description")}),
     )
 }
+fn parse_docker_ps(s: &str) -> Result<Value, String> {
+    let containers = s
+        .lines()
+        .filter_map(|line| {
+            let v = serde_json::from_str::<Value>(line).ok()?;
+            if !v.is_object() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "id": v["Id"].as_str().unwrap_or(""),
+                "name": v["Names"].as_array().and_then(|a| a.first()).and_then(Value::as_str).map(|n| n.trim_start_matches('/')).unwrap_or(""),
+                "image": v["Image"].as_str().unwrap_or(""),
+                "state": v["State"].as_str().unwrap_or(""),
+                "status": v["Status"].as_str().unwrap_or(""),
+                "command": redact(v["Command"].as_str().unwrap_or("")),
+            }))
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({"containers": containers}))
+}
+fn parse_docker_inspect(s: &str) -> Result<Value, String> {
+    let parsed: Value = serde_json::from_str(s).map_err(|_| "parse_failed".to_string())?;
+    parsed
+        .as_array()
+        .and_then(|a| a.first())
+        .cloned()
+        .filter(|v| v.is_object())
+        .ok_or_else(|| "container_not_found".into())
+}
+fn parse_docker_stats(s: &str) -> Result<Value, String> {
+    let v = s
+        .lines()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .ok_or("parse_failed")?;
+    Ok(serde_json::json!({
+        "container": v["ID"].as_str().or_else(|| v["Container"].as_str()).unwrap_or(""),
+        "name": v["Name"].as_str().unwrap_or(""),
+        "cpuPercent": v["CPUPerc"].as_str().unwrap_or(""),
+        "memUsage": v["MemUsage"].as_str().unwrap_or(""),
+        "memPercent": v["MemPerc"].as_str().unwrap_or(""),
+        "netIO": v["NetIO"].as_str().unwrap_or(""),
+        "blockIO": v["BlockIO"].as_str().unwrap_or(""),
+        "pids": v["PIDs"].as_str().unwrap_or(""),
+    }))
+}
+fn parse_docker_lifecycle(s: &str, call: &ToolCall) -> Result<Value, String> {
+    let section = s
+        .rsplit_once("__INFRADECK_RESTART__")
+        .map(|(_, after)| after)
+        .unwrap_or(s);
+    let state: Value =
+        serde_json::from_str(section.trim()).map_err(|_| "parse_failed".to_string())?;
+    let running = state["Running"].as_bool().unwrap_or(false);
+    let expected = call.name != "docker.stop";
+    Ok(serde_json::json!({
+        "container": call.input["container"],
+        "running": running,
+        "status": state["Status"].as_str().unwrap_or("unknown"),
+        "exitCode": state["ExitCode"].as_i64().unwrap_or(0),
+        "expectedRunning": expected,
+        "verified": running == expected,
+    }))
+}
 pub(crate) fn redact(value: &str) -> String {
     let lowered = value.to_ascii_lowercase();
     if ["password=", "token=", "secret=", "authorization:"]
@@ -727,6 +990,22 @@ fn summary(call: &ToolCall, data: &Value) -> String {
         ),
         "service.status" => format!("服务状态：{}", data["activeState"]),
         "service.restart" => format!("服务已重启并验证：{}", data["activeState"]),
+        "docker.ps" => format!(
+            "返回 {} 个容器",
+            data["containers"].as_array().map_or(0, Vec::len)
+        ),
+        "docker.inspect" => format!(
+            "容器状态：{}",
+            data["State"]["Status"].as_str().unwrap_or("unknown")
+        ),
+        "docker.stats" => format!(
+            "容器 CPU {} / Mem {}",
+            data["cpuPercent"], data["memPercent"]
+        ),
+        "docker.start" | "docker.stop" | "docker.restart" => {
+            format!("容器已操作并验证：running={}", data["running"])
+        }
+        "docker.execute" => "容器内命令执行完成".into(),
         _ => format!("{} 执行成功", call.name),
     }
 }
@@ -857,5 +1136,94 @@ mod tests {
         assert_eq!(service["activeState"], "active");
         let ports = parse_ports("tcp LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=1,fd=3))\nudp UNCONN 0 0 0.0.0.0:53 0.0.0.0:*").unwrap();
         assert_eq!(ports["ports"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn validates_container_id_bounds_and_chars() {
+        assert!(valid_container_id("ab12cd34ef56"));
+        assert!(valid_container_id("a".repeat(64).as_str()));
+        assert!(!valid_container_id("short"));
+        assert!(!valid_container_id(&"a".repeat(65)));
+        assert!(!valid_container_id("ab12cd34ef5_"));
+        assert!(!valid_container_id("ab12 cd34ef5g"));
+        assert!(!valid_container_id("ab12cd34ef5-"));
+    }
+
+    #[test]
+    fn validates_docker_call_target_and_fields() {
+        let d = resolve("docker.stop", "1.0.0").unwrap();
+        let good = ToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: d.name.clone(),
+            version: d.version.clone(),
+            input: serde_json::json!({"container":"ab12cd34ef56","timeout":5}),
+            target: ResourceTarget::Container {
+                server_id: "s".into(),
+                container_id: "ab12cd34ef56".into(),
+            },
+            requested_at: Utc::now().to_rfc3339(),
+            conversation_id: None,
+            agent_run_id: None,
+        };
+        assert!(validate_call(&good, &d).is_ok());
+        let mismatch = ToolCall {
+            target: ResourceTarget::Container {
+                server_id: "s".into(),
+                container_id: "cd34ef56ab12".into(),
+            },
+            ..good.clone()
+        };
+        assert!(validate_call(&mismatch, &d).is_err());
+        let short = ToolCall {
+            input: serde_json::json!({"container":"bad"}),
+            ..good.clone()
+        };
+        assert!(validate_call(&short, &d).is_err());
+    }
+
+    #[test]
+    fn parses_docker_ps_json_lines() {
+        let out = "{\"Id\":\"ab12cd34ef56\",\"Names\":[\"/web\"],\"Image\":\"nginx:1.25\",\"State\":\"running\",\"Status\":\"Up 2 minutes\",\"Command\":\"nginx -g daemon off;\"}\nnot json\n{\"Id\":\"cd34ef56ab12\",\"Names\":null,\"Image\":\"redis\",\"State\":\"exited\",\"Status\":\"Exited (0) 1 hour ago\"}\n";
+        let value = parse_docker_ps(out).unwrap();
+        let containers = value["containers"].as_array().unwrap();
+        assert_eq!(containers.len(), 2);
+        assert_eq!(containers[0]["id"], "ab12cd34ef56");
+        assert_eq!(containers[0]["name"], "web");
+        assert_eq!(containers[0]["state"], "running");
+        assert_eq!(containers[1]["name"], "");
+        assert_eq!(
+            parse_docker_ps("").unwrap()["containers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn parses_docker_lifecycle_state_section() {
+        let out = "ab12cd34ef56\n__INFRADECK_RESTART__\n{\"Status\":\"running\",\"Running\":true,\"ExitCode\":0}";
+        let call = ToolCall {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "docker.start".into(),
+            version: "1.0.0".into(),
+            input: serde_json::json!({"container":"ab12cd34ef56"}),
+            target: ResourceTarget::Container {
+                server_id: "s".into(),
+                container_id: "ab12cd34ef56".into(),
+            },
+            requested_at: Utc::now().to_rfc3339(),
+            conversation_id: None,
+            agent_run_id: None,
+        };
+        let value = parse_docker_lifecycle(out, &call).unwrap();
+        assert_eq!(value["running"], true);
+        assert_eq!(value["verified"], true);
+        let stop_call = ToolCall {
+            name: "docker.stop".into(),
+            ..call
+        };
+        let stopped = parse_docker_lifecycle(out, &stop_call).unwrap();
+        assert_eq!(stopped["verified"], false);
     }
 }

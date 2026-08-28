@@ -23,7 +23,7 @@ export const appErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
   retryable: z.boolean(),
-  category: z.enum(['ssh', 'tool', 'policy', 'ai', 'storage', 'validation', 'credential', 'unknown']),
+  category: z.enum(['ssh', 'tool', 'policy', 'ai', 'storage', 'validation', 'credential', 'fs', 'unknown']),
   details: z.record(z.unknown()).optional(),
 });
 

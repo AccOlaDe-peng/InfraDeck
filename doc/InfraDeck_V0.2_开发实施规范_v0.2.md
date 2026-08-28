@@ -402,15 +402,32 @@ Container { server_id: String, container_id: String }
 - AI 相关新行为（会话落盘、流式、批量）均有 qa.rs 集成测试且不依赖真实 LLM。
 - `cargo clippy --tests -- -D warnings` 与 `pnpm build` 全绿；bundle 体积若因 xterm 超限，用动态 import 拆 chunk。
 
-## 9. 实施回填（M6/M7 已实现部分）
+## 9. 实施回填（M6–M9 已实现部分）
 
 | 设计条目 | 实施决策 | 原因 |
 | --- | --- | --- |
+| §5.1 FileSystemProvider 独立 trait | fs 方法直接挂在 `SshProvider` trait 上（`fs_list/fs_stat/fs_mkdir/fs_rename/fs_delete/fs_read_range/fs_write_range`），`FsProvider` trait 保留为 V1 非 SSH 文件系统的扩展缝 | 连接句柄由 SshManager 持有，russh-sftp 会话需经 russh channel 打开；拆分两个 provider 会导致句柄跨模块传递 |
+| §5.1 russh-sftp 版本 | `russh-sftp = "2.4"`，会话经 `SftpSession::new(channel.into_stream())`，按 connection_id 懒加载缓存 | |
+| §5.3 FS_EXISTS 二选一 | 采用专用 `FS_EXISTS` code（fs category，不可重试） | overwrite 需显式；与 FS_PATH_INVALID 语义分离 |
+| §5.3 传输 pause | 未实现 pause，仅 cancel（回填为 V1） | 暂停需要句柄生命周期管理，V0.2 收益低 |
+| §5.3 分块 I/O | 每个 chunk 独立 open+seek+read/write+close | 无状态、崩溃安全；大文件吞吐优化（持久句柄）留待 V1 |
+| §5.3 Policy 集成 | fs 写操作走「UI 显式确认 + 强制审计」：上传覆盖必须 `overwrite:true`（后端校验，缺失返回 FS_EXISTS）；递归删除前端二次确认；每个写操作写 `fs.write`/`fs.delete` 审计。完整 Tool/Policy 管道集成（`fs.*` 作为注册工具进入 AI 可调用范围）回填为 V1 | AI 调用文件写按设计文档 §9.3 本就要求 UI 确认，V0.2 先保证「用户显式 + 审计」的下限 |
+| §9.1 错误码 | `FS_TRANSFER_FAILED` retryable=true，其余 fs 错码不可重试；`FS_EXISTS` 新增 | 
 | §3.1 `batch_resume` 命令 | 未实现独立命令 | 每个 mutation 调用有独立 ApprovalRequest，走既有 `approval_resolve` 即完成执行与绑定校验；批量状态无需持久化，前端顺序消费审批队列即可 |
 | §3.2 批量汇总事件 outcome | `running` 改为 `partial` | `audit_events.outcome` 的 CHECK 约束（migration 0001）只允许 success/failed/denied/cancelled/partial |
 | §1.1 ai_conversations 表 | 0005 迁移改为 `ALTER TABLE ADD COLUMN` | V0.1 migration 0001 已创建极简 `ai_conversations(id,title,created_at,updated_at)`，`CREATE TABLE IF NOT EXISTS` 不生效 |
 | §1.5 会话标题 | 存入 `AgentRunState.title`（新增字段） | 会话行创建发生在 run 结束时，首条用户消息需随 run 状态携带 |
 | §2.1 `audit_events_list` | 保留原实现，未合并到 query 路径 | 兼容存量调用；`audit_events_query` 为新入口 |
+| §6.1 `docker.ps` 的 `all` 参数 | 模板按条件输出：`docker ps [-a] --format '{{json .}}'` | 默认只列运行中容器；`all:true` 才含已停止，与 schema 的 `all` 字段语义一致 |
+| §6.1 lifecycle 无 `-t` 差异 | start 模板不含 `-t`，stop/restart 含 `-t <timeout>`（默认 10，schema 1..=120） | `docker start` 无 `-t` 选项，stop/restart 才有 |
+| §6.1 lifecycle 状态验证 | stop/start/restart 模板拼接 `; status=$?; printf '\n__INFRADECK_RESTART__\n'; docker inspect --format '{{json .State}}' <c> 2>/dev/null; exit $status`；解析标记后分段取 State，`Running` 与期望（stop=false，其余=true）不符 → `partial` + warning | 复用 service.restart 的 `__INFRADECK_RESTART__` marker 模式；退出码保留为 lifecycle 命令真实结果 |
+| §6.1 `docker.execute` 命令引用 | 模板 `docker exec <c> sh -c <cmd>`，`<c>` 与 `<cmd>` 均经 `shell_escape` 单引号包裹 | 命令文本在远端 shell 仅经过 `sh -c` 一层，防注入 |
+| §6.1 hard_block 共享通道 | `hard_block()` selector 扩为 `matches!(name, "shell.execute" \| "docker.execute")`，HB-001..004 规则不变，检查 `input.command` | 规范要求命令文本整体过 HB 规则 |
+| §6.1 DOCKER_CLI_MISSING 检测 | 仅当 `exit≠0` 且 stderr 含 `not found` 时映射 `DOCKER_CLI_MISSING`（不可重试）；其余失败保持 `TOOL_EXEC_FAILED`（可重试） | 遥测与 shell 的 "command not found" 语义一致；"No such object" 等容器业务错误不误伤 |
+| §6.1 ps 行 name 归一化 | `Names` 数组取首个元素并 trim 前导 `/`；非 JSON 行跳过；空输出返回空列表 | docker `Names` 形如 `["/web"]` |
+| §6.1 docker.inspect 解析 | `docker inspect` 输出 JSON 数组，取首个 object 原样透出（含 `State`、`Config` 等） | adapter 不做字段白名单，保持与 CLI 一致 |
+| §6.2 UI | 仅 Quick Actions「容器」分组（docker.ps / docker.logs / docker.restart），容器 id 由 prompt 输入；「列表可展开行 + 行内 start/stop/logs」容器管理器回填为后续版本 | Quick Actions 与命令面板共享 `commandMeta` 元数据，改动面最小 |
+| §6.3 QA 脚本 | `ScriptedExec` 新增 `Stderr { stderr, exit_code }` 变体以模拟 "command not found" | 原脚本只有 Stdout/Error，无法覆盖 stderr 检测路径 |
 
 ## 10. 任务顺序建议
 

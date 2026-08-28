@@ -176,15 +176,44 @@ impl From<LlmError> for AppError {
 
 /// LLM Provider abstraction. V0.1 ships an OpenAI-compatible implementation;
 /// future providers (Anthropic, Ollama, …) implement the same trait.
+#[derive(Debug, Clone)]
+pub enum StreamFinishReason {
+    Completed,
+    Cancelled,
+    Error(String),
+}
+
+/// Receives incremental model output as it arrives. Implementations must be
+/// cheap — called once per SSE chunk on the streaming path.
+pub trait StreamSink: Send + Sync {
+    fn delta(&self, text: &str);
+    fn finished(&self, reason: StreamFinishReason);
+}
+
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError>;
-    /// Reserved for M4/M5 capability gating; streaming arrives with V1 UX.
+    /// Streaming chat. Default implementation falls back to `chat` and emits
+    /// the full text as one delta, so test doubles need not implement SSE.
+    async fn stream(
+        &self,
+        request: ChatRequest,
+        sink: std::sync::Arc<dyn StreamSink>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ChatResponse, LlmError> {
+        let _ = &cancel;
+        let response = self.chat(request).await?;
+        if let Some(text) = &response.content {
+            sink.delta(text);
+        }
+        sink.finished(StreamFinishReason::Completed);
+        Ok(response)
+    }
     #[allow(dead_code)]
     fn capabilities(&self) -> LlmCapabilities {
         LlmCapabilities {
             tool_calling: true,
-            streaming: false,
+            streaming: true,
         }
     }
 }
@@ -194,6 +223,60 @@ pub trait LlmProvider: Send + Sync {
 pub struct LlmCapabilities {
     pub tool_calling: bool,
     pub streaming: bool,
+}
+
+/// Aggregates OpenAI streaming deltas: content fragments and tool_calls that
+/// arrive split across chunks (id/name first, arguments piecewise, by index).
+#[derive(Default)]
+pub(crate) struct StreamAggregator {
+    content: String,
+    tool_calls: Vec<RequestedToolCallSpec>,
+}
+
+impl StreamAggregator {
+    /// Absorbs one `data: {json}` chunk; returns extracted text delta, if any.
+    pub(crate) fn absorb(&mut self, payload: &Value) -> Option<String> {
+        let delta = &payload["choices"][0]["delta"];
+        if let Some(text) = delta["content"].as_str() {
+            self.content.push_str(text);
+            return Some(text.to_string());
+        }
+        if let Some(calls) = delta["tool_calls"].as_array() {
+            for call in calls {
+                let index = call["index"].as_u64().unwrap_or(0) as usize;
+                while self.tool_calls.len() <= index {
+                    self.tool_calls.push(RequestedToolCallSpec {
+                        id: String::new(),
+                        name: String::new(),
+                        arguments: String::new(),
+                    });
+                }
+                let slot = &mut self.tool_calls[index];
+                if let Some(id) = call["id"].as_str() {
+                    slot.id.push_str(id);
+                }
+                if let Some(name) = call["function"]["name"].as_str() {
+                    slot.name.push_str(name);
+                }
+                if let Some(arguments) = call["function"]["arguments"].as_str() {
+                    slot.arguments.push_str(arguments);
+                }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn finish(self) -> ChatResponse {
+        ChatResponse {
+            content: if self.content.is_empty() {
+                None
+            } else {
+                Some(self.content)
+            },
+            tool_calls: self.tool_calls,
+            ..Default::default()
+        }
+    }
 }
 
 pub struct OpenAiCompatibleProvider {
@@ -220,6 +303,87 @@ impl OpenAiCompatibleProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
+    async fn stream(
+        &self,
+        request: ChatRequest,
+        sink: std::sync::Arc<dyn StreamSink>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ChatResponse, LlmError> {
+        use futures_util::StreamExt;
+        let model = if request.model.is_empty() {
+            self.model.clone()
+        } else {
+            request.model.clone()
+        };
+        let body = serde_json::json!({
+            "model": model,
+            "messages": request.messages,
+            "tools": request.tools.iter().map(|tool| serde_json::json!({
+                "type": "function",
+                "function": {"name": tool.name, "description": tool.description, "parameters": tool.parameters}
+            })).collect::<Vec<_>>(),
+            "stream": true,
+        });
+        let url = format!("{}/chat/completions", self.base_url);
+        let response = tokio::select! {
+            _ = cancel.cancelled() => {
+                sink.finished(StreamFinishReason::Cancelled);
+                return Err(LlmError::Transport("cancelled".into()));
+            }
+            response = self.http.post(&url).bearer_auth(&self.api_key).json(&body).send() => {
+                response.map_err(|error| LlmError::Transport(error.to_string()))?
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let error = LlmError::Transport(format!("HTTP {status}: provider returned an error"));
+            sink.finished(StreamFinishReason::Error(error.to_string()));
+            return Err(error);
+        }
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut aggregator = StreamAggregator::default();
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    sink.finished(StreamFinishReason::Cancelled);
+                    return Err(LlmError::Transport("cancelled".into()));
+                }
+                chunk = byte_stream.next() => match chunk {
+                    None => break,
+                    Some(Err(error)) => {
+                        let error = LlmError::Transport(error.to_string());
+                        sink.finished(StreamFinishReason::Error(error.to_string()));
+                        return Err(error);
+                    }
+                    Some(Ok(bytes)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        // SSE events are newline-delimited; process complete lines.
+                        while let Some(position) = buffer.find('\n') {
+                            let line: String = buffer.drain(..position + 1).collect();
+                            let line = line.trim();
+                            let Some(payload) = line.strip_prefix("data: ") else { continue };
+                            let payload = payload.trim();
+                            if payload == "[DONE]" {
+                                continue;
+                            }
+                            match serde_json::from_str::<Value>(payload) {
+                                Ok(value) => {
+                                    if let Some(text) = aggregator.absorb(&value) {
+                                        sink.delta(&text);
+                                    }
+                                }
+                                Err(_) => continue, // keep-alive comments and partial lines
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        sink.finished(StreamFinishReason::Completed);
+        Ok(aggregator.finish())
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, LlmError> {
         let model = if request.model.is_empty() {
             self.model.clone()
@@ -401,6 +565,50 @@ mod tests {
         let sanitized = sanitize_tool_output(&"x".repeat(3000), 100);
         assert!(sanitized.contains("输出已截断"));
         assert!(sanitized.chars().count() < 200);
+    }
+
+    #[test]
+    fn stream_aggregator_reassembles_split_deltas() {
+        use super::StreamAggregator;
+        let mut aggregator = StreamAggregator::default();
+        let chunks = [
+            serde_json::json!({"choices":[{"delta":{"content":"内存"}}]}),
+            serde_json::json!({"choices":[{"delta":{"content":"使用率 90%"}}]}),
+        ];
+        let mut text = String::new();
+        for chunk in &chunks {
+            text.push_str(&aggregator.absorb(chunk).expect("text delta"));
+        }
+        assert_eq!(text, "内存使用率 90%");
+        // Tool call split across three chunks: id+name first, arguments piecewise.
+        let calls = [
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","function":{"name":"service.restart","arguments":""}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"serv"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ice\":\"nginx\"}"}}]}}]}),
+        ];
+        for call in &calls {
+            assert!(
+                aggregator.absorb(call).is_none(),
+                "tool chunks carry no text delta"
+            );
+        }
+        let response = aggregator.finish();
+        assert_eq!(response.content.as_deref(), Some("内存使用率 90%"));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_9");
+        assert_eq!(response.tool_calls[0].name, "service.restart");
+        assert_eq!(response.tool_calls[0].arguments, r#"{"service":"nginx"}"#);
+    }
+
+    #[test]
+    fn stream_aggregator_handles_two_parallel_tool_calls() {
+        use super::StreamAggregator;
+        let mut aggregator = StreamAggregator::default();
+        aggregator.absorb(&serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"name":"tool.a","arguments":"{}"}}]}}]}));
+        aggregator.absorb(&serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","function":{"name":"tool.b","arguments":"{}"}}]}}]}));
+        let response = aggregator.finish();
+        assert_eq!(response.tool_calls.len(), 2);
+        assert_eq!(response.tool_calls[1].name, "tool.b");
     }
 
     #[test]

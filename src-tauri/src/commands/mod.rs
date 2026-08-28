@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod fs;
 
 use base64::Engine as _;
 use chrono::Utc;

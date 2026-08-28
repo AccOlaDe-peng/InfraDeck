@@ -20,6 +20,7 @@ use crate::{
     app_state::AppState,
     commands,
     credentials::{CredentialError, CredentialProvider, SecretValue},
+    fs::FtpError,
     models::{AuthRef, Environment, ServerProfile},
     policy::ApprovalGrant,
     ssh::{
@@ -39,6 +40,10 @@ enum ScriptedExec {
         stdout: String,
         exit_code: i32,
         truncated: bool,
+    },
+    Stderr {
+        stderr: String,
+        exit_code: i32,
     },
     Error(String),
 }
@@ -93,6 +98,58 @@ impl SshProvider for ScriptedSshProvider {
     async fn pty_close(&self, _pty_id: &str) -> Result<(), SshError> {
         Err(SshError::ConnectionNotFound)
     }
+    async fn fs_list(
+        &self,
+        _connection_id: &str,
+        _path: &str,
+    ) -> Result<Vec<crate::fs::FileEntry>, FtpError> {
+        Err(FtpError::NotFound)
+    }
+    async fn fs_stat(
+        &self,
+        _connection_id: &str,
+        _path: &str,
+    ) -> Result<crate::fs::FileEntry, FtpError> {
+        Err(FtpError::NotFound)
+    }
+    async fn fs_mkdir(&self, _connection_id: &str, _path: &str) -> Result<(), FtpError> {
+        Err(FtpError::NotFound)
+    }
+    async fn fs_rename(
+        &self,
+        _connection_id: &str,
+        _from: &str,
+        _to: &str,
+    ) -> Result<(), FtpError> {
+        Err(FtpError::NotFound)
+    }
+    async fn fs_delete(
+        &self,
+        _connection_id: &str,
+        _path: &str,
+        _recursive: bool,
+    ) -> Result<(), FtpError> {
+        Err(FtpError::NotFound)
+    }
+    async fn fs_read_range(
+        &self,
+        _connection_id: &str,
+        _path: &str,
+        _offset: u64,
+        _len: u32,
+    ) -> Result<crate::fs::FsChunk, FtpError> {
+        Err(FtpError::NotFound)
+    }
+    async fn fs_write_range(
+        &self,
+        _connection_id: &str,
+        _path: &str,
+        _offset: u64,
+        _data: &[u8],
+        _truncate: bool,
+    ) -> Result<(), FtpError> {
+        Err(FtpError::NotFound)
+    }
     async fn exec(
         &self,
         _connection: &ProviderConnection,
@@ -107,6 +164,16 @@ impl SshProvider for ScriptedSshProvider {
         }
         match queue.remove(0) {
             ScriptedExec::Error(message) => Err(SshError::Provider(message)),
+            ScriptedExec::Stderr { stderr, exit_code } => Ok(ExecResult {
+                exit_code: Some(exit_code),
+                stdout_bytes: 0,
+                stderr_bytes: stderr.len(),
+                stderr,
+                duration_ms: 1,
+                truncated: false,
+                stdout: String::new(),
+                signal: None,
+            }),
             ScriptedExec::Stdout {
                 stdout,
                 exit_code,
@@ -181,6 +248,7 @@ fn harness(script: Vec<ScriptedExec>) -> TestHarness {
         host_keys: Arc::new(HostKeyTrustStore::default()),
         pending_tool_calls: Mutex::new(HashMap::new()),
         ai_runs: Mutex::new(HashMap::new()),
+        transfers: Arc::new(Mutex::new(HashMap::new())),
     };
     TestHarness { state, credentials }
 }
@@ -219,6 +287,23 @@ fn server(server_id: &str) -> ResourceTarget {
     ResourceTarget::Server {
         server_id: server_id.into(),
     }
+}
+
+fn container(server_id: &str, container_id: &str) -> ResourceTarget {
+    ResourceTarget::Container {
+        server_id: server_id.into(),
+        container_id: container_id.into(),
+    }
+}
+
+fn docker_ps_row(id: &str, state: &str) -> String {
+    format!(
+        "{{\"Id\":\"{id}\",\"Names\":[\"/web\"],\"Image\":\"nginx:1.25\",\"State\":\"{state}\",\"Status\":\"Up 2 minutes\",\"Command\":\"nginx -g daemon off;\"}}"
+    )
+}
+fn docker_stopped_state() -> String {
+    "ab12cd34ef56\n__INFRADECK_RESTART__\n{\"Status\":\"exited\",\"Running\":false,\"ExitCode\":0}"
+        .into()
 }
 
 async fn connect_server(harness: &TestHarness, profile: &ServerProfile) {
@@ -823,9 +908,16 @@ async fn agent_loop_diagnoses_through_readonly_tools_without_approval() {
         ScriptedLlmProvider::assistant_text("内存使用率 90%，主要来自应用堆内存。"),
     ]);
     let mut run = agent_run("srv-agent");
-    let outcome =
-        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(4), &profile, &llm)
-            .await;
+    let run_id = run.run_id.clone();
+    let outcome = commands::ai::run_loop_with_provider(
+        &h.state,
+        &mut run,
+        &ai_settings(4),
+        &profile,
+        &llm,
+        commands::ai::AiEventBridge::disabled(run_id),
+    )
+    .await;
     assert_eq!(outcome.status, "completed");
     assert_eq!(run.steps.len(), 1);
     assert_eq!(run.steps[0].name, "system.memory");
@@ -859,10 +951,16 @@ async fn agent_loop_pauses_on_mutation_and_waits_for_approval() {
         r#"{"service":"nginx"}"#,
     )])]);
     let mut run = agent_run("srv-agent-prod");
-    let outcome =
-        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(4), &profile, &llm)
-            .await;
-    eprintln!("MUTATION OUTCOME: {:?}", outcome.error);
+    let run_id = run.run_id.clone();
+    let outcome = commands::ai::run_loop_with_provider(
+        &h.state,
+        &mut run,
+        &ai_settings(4),
+        &profile,
+        &llm,
+        commands::ai::AiEventBridge::disabled(run_id),
+    )
+    .await;
     assert_eq!(outcome.status, "waitingApproval");
     let approval = outcome.pending_approval.expect("pending approval");
     assert_eq!(
@@ -894,9 +992,16 @@ async fn agent_loop_stops_at_iteration_budget() {
         repeating(),
     ]);
     let mut run = agent_run("srv-budget");
-    let outcome =
-        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(2), &profile, &llm)
-            .await;
+    let run_id = run.run_id.clone();
+    let outcome = commands::ai::run_loop_with_provider(
+        &h.state,
+        &mut run,
+        &ai_settings(2),
+        &profile,
+        &llm,
+        commands::ai::AiEventBridge::disabled(run_id),
+    )
+    .await;
     assert_eq!(outcome.status, "completed");
     assert!(outcome
         .final_text
@@ -921,9 +1026,16 @@ async fn agent_loop_survives_malformed_tool_arguments() {
         ScriptedLlmProvider::assistant_text("参数无效，已停止。"),
     ]);
     let mut run = agent_run("srv-args");
-    let outcome =
-        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(4), &profile, &llm)
-            .await;
+    let run_id = run.run_id.clone();
+    let outcome = commands::ai::run_loop_with_provider(
+        &h.state,
+        &mut run,
+        &ai_settings(4),
+        &profile,
+        &llm,
+        commands::ai::AiEventBridge::disabled(run_id),
+    )
+    .await;
     assert_eq!(outcome.status, "completed");
     assert_eq!(run.steps[0].status, "failed");
     let tool_message = run
@@ -948,9 +1060,16 @@ async fn agent_loop_honours_cancellation() {
     )])]);
     let mut run = agent_run("srv-cancel");
     run.token.cancel();
-    let outcome =
-        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(4), &profile, &llm)
-            .await;
+    let run_id = run.run_id.clone();
+    let outcome = commands::ai::run_loop_with_provider(
+        &h.state,
+        &mut run,
+        &ai_settings(4),
+        &profile,
+        &llm,
+        commands::ai::AiEventBridge::disabled(run_id),
+    )
+    .await;
     assert_eq!(outcome.status, "cancelled");
 }
 
@@ -1101,9 +1220,16 @@ async fn agent_run_persists_conversation_and_messages() {
         ScriptedLlmProvider::assistant_text("内存使用率 90%。"),
     ]);
     let mut run = agent_run("srv-persist");
-    let outcome =
-        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(4), &profile, &llm)
-            .await;
+    let run_id = run.run_id.clone();
+    let outcome = commands::ai::run_loop_with_provider(
+        &h.state,
+        &mut run,
+        &ai_settings(4),
+        &profile,
+        &llm,
+        commands::ai::AiEventBridge::disabled(run_id),
+    )
+    .await;
     assert_eq!(outcome.status, "completed");
     commands::ai::persist_run_messages(&h.state, &mut run);
 
@@ -1165,9 +1291,16 @@ async fn persistence_off_writes_metadata_only() {
 
     let llm = ScriptedLlmProvider::new(vec![ScriptedLlmProvider::assistant_text("仅元数据。")]);
     let mut run = agent_run("srv-nopersist");
-    let outcome =
-        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(4), &profile, &llm)
-            .await;
+    let run_id = run.run_id.clone();
+    let outcome = commands::ai::run_loop_with_provider(
+        &h.state,
+        &mut run,
+        &ai_settings(4),
+        &profile,
+        &llm,
+        commands::ai::AiEventBridge::disabled(run_id),
+    )
+    .await;
     assert_eq!(outcome.status, "completed");
     commands::ai::persist_run_messages(&h.state, &mut run);
 
@@ -1240,6 +1373,176 @@ async fn read_only_permission_mode_denies_tool_execution_end_to_end() {
     assert!(audit
         .iter()
         .any(|event| event.policy_action.as_deref() == Some("deny") && event.outcome == "denied"));
+}
+
+// ---------------------------------------------------------------------------
+// M9 Docker container management: approval-gated lifecycle, CLI missing
+// mapping, and shared hard-block rules for in-container commands.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn docker_lifecycle_requires_approval_and_verifies() {
+    let h = harness(vec![
+        stdout(docker_ps_row("ab12cd34ef56", "running")),
+        stdout(docker_stopped_state()),
+        stdout(docker_ps_row("ab12cd34ef56", "exited")),
+    ]);
+    let profile = profile("srv-prod", Environment::Production, "root");
+    h.state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_server(&h, &profile).await;
+    let cid = "ab12cd34ef56";
+
+    let listing = expect_result(
+        commands::execute_tool(
+            &h.state,
+            call(
+                "docker.ps",
+                serde_json::json!({"all": true}),
+                server("srv-prod"),
+            ),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(listing.status, "success");
+    assert_eq!(listing.data.as_ref().unwrap()["containers"][0]["id"], cid);
+
+    let approval = expect_approval(
+        commands::execute_tool(
+            &h.state,
+            call(
+                "docker.stop",
+                serde_json::json!({"container": cid}),
+                container("srv-prod", cid),
+            ),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(
+        approval.risk.level,
+        crate::policy::RiskLevel::High,
+        "production container mutation is high risk"
+    );
+    assert_eq!(
+        approval.required_confirmation,
+        crate::policy::RequiredConfirmation::TypeTarget
+    );
+
+    // Wrong typed target must not execute.
+    let wrong_target = expect_result(
+        commands::resolve_approval(
+            &h.state,
+            ApprovalGrant {
+                approval_id: approval.approval_id.clone(),
+                request_hash: approval.request_hash.clone(),
+                decision: crate::policy::ApprovalDecision::Approve,
+                typed_confirmation: Some("srv-prod/other".into()),
+            },
+        )
+        .await
+        .expect("resolve"),
+    );
+    assert_eq!(wrong_target.status, "denied");
+
+    let granted = expect_result(
+        commands::resolve_approval(
+            &h.state,
+            ApprovalGrant {
+                approval_id: approval.approval_id.clone(),
+                request_hash: approval.request_hash.clone(),
+                decision: crate::policy::ApprovalDecision::Approve,
+                typed_confirmation: Some(format!("srv-prod/container:{cid}")),
+            },
+        )
+        .await
+        .expect("resolve"),
+    );
+    assert_eq!(granted.status, "success");
+    assert_eq!(granted.data.as_ref().unwrap()["running"], false);
+    assert_eq!(granted.data.as_ref().unwrap()["verified"], true);
+    assert_eq!(granted.changed_resources.len(), 1);
+
+    // Re-check confirms the container is no longer running.
+    let recheck = expect_result(
+        commands::execute_tool(
+            &h.state,
+            call("docker.ps", serde_json::json!({}), server("srv-prod")),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(
+        recheck.data.as_ref().unwrap()["containers"][0]["state"],
+        "exited"
+    );
+}
+
+#[tokio::test]
+async fn docker_cli_missing_maps_error() {
+    let h = harness(vec![ScriptedExec::Stderr {
+        stderr: "bash: docker: command not found\n".into(),
+        exit_code: 127,
+    }]);
+    let profile = profile("srv-cli", Environment::Dev, "dev");
+    h.state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_server(&h, &profile).await;
+
+    let result = expect_result(
+        commands::execute_tool(
+            &h.state,
+            call("docker.ps", serde_json::json!({}), server("srv-cli")),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(result.status, "failed");
+    let error = result.error.expect("error");
+    assert_eq!(error.code, "DOCKER_CLI_MISSING");
+    assert!(!error.retryable);
+}
+
+#[tokio::test]
+async fn docker_execute_hard_block_rejects_rm_rf() {
+    let h = harness(vec![]);
+    let profile = profile("srv-hb", Environment::Dev, "dev");
+    h.state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_server(&h, &profile).await;
+
+    let result = expect_result(
+        commands::execute_tool(
+            &h.state,
+            call(
+                "docker.execute",
+                serde_json::json!({"container":"ab12cd34ef56","command":"rm -rf /","timeoutMs":5000}),
+                container("srv-hb", "ab12cd34ef56"),
+            ),
+            "user",
+        )
+        .await
+        .expect("execute"),
+    );
+    assert_eq!(result.status, "denied");
+    assert_eq!(result.error.expect("error").code, "POLICY_DENIED");
 }
 
 // ---------------------------------------------------------------------------

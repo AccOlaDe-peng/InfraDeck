@@ -230,7 +230,7 @@ pub fn evaluate(
 }
 
 fn hard_block(call: &ToolCall) -> Option<&'static str> {
-    if call.name != "shell.execute" {
+    if !matches!(call.name.as_str(), "shell.execute" | "docker.execute") {
         return None;
     }
     let command = call.input.get("command")?.as_str()?.to_ascii_lowercase();
