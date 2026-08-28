@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { api, AppError } from '../lib/tauri';
-import { loadThemePreference, watchTheme } from '../lib/theme';
+import { applyAppearance } from '../lib/theme';
 import { TOOL_COMMANDS, buildTarget, buildToolInput, promptResourceId, type ToolCommandMeta } from '../lib/commandMeta';
 import type {
   AgentRunDto, AiConversation, AiMessage, AiProviderSettings, ApprovalRequest, AppSettings,
@@ -47,7 +47,7 @@ export default function App() {
   const [aiCollapsed, setAiCollapsed] = useState(() => localStorage.getItem('infradeck.aiCollapsed') === '1');
 
   // Theme preference is device-local; `system` keeps following the OS live.
-  useEffect(() => watchTheme(loadThemePreference()), []);
+  useEffect(() => applyAppearance(), []);
 
   const toggleAiPanel = (collapsed: boolean) => {
     setAiCollapsed(collapsed);
@@ -493,6 +493,7 @@ export default function App() {
           {lastToolResult && <code className="exec-output tool-last">{lastToolResult.summary}</code>}
           <WorkspaceTabs
             tabs={tabs}
+            openViews={openViews}
             activePane={activePane}
             profiles={profiles}
             onSelectTerminal={(tabId) => { setActiveTabId(tabId); setActivePane({ kind: 'terminal', id: tabId }); }}
@@ -537,6 +538,21 @@ export default function App() {
                 onError={(text) => setBanner({ kind: 'error', text })}
               />
             ) : <div className="terminal-placeholder">容器视图需要先连接服务器。</div>;
+          }
+          if (activePane?.kind === 'terminal' && connected && openViews.includes('files')) {
+            return (
+              <div className="prototype-split">
+                <TerminalTabs tabs={tabs} activeTabId={activePane.id} profiles={profiles} onClose={(tabId) => void closeTab(tabId)} />
+                <div className="split-files-heading"><span><i className="server-dot online" />{active.name} 文件</span><span>×</span></div>
+                <FilesView
+                  server={active}
+                  connection={connections[active.id]}
+                  peers={connectedServers.filter((item) => item.id !== active.id).map((item) => ({ server: item, connection: connections[item.id] }))}
+                  onNotify={notify}
+                  onError={(text) => setBanner({ kind: 'error', text })}
+                />
+              </div>
+            );
           }
           return (
             <TerminalTabs
@@ -586,9 +602,17 @@ export default function App() {
         )}
       </div>
 
-      <footer>
-        <span>InfraDeck v0.1 · M5 V1 UX</span>
-        <button className="text-button" onClick={() => void refresh()}>重新检查</button>
+      <footer className="statusbar">
+        <span className="status-connected"><i />{selectedServer ? `已连接：${selectedServer.name}` : '未选择连接'}</span>
+        <span>SSH：{selectedServer ? `${selectedServer.host}:${selectedServer.port}（${selectedServer.username}）` : '—'}</span>
+        <span className="status-accent">⌾ 延迟：{selectedServer ? '—' : '—'}</span>
+        <span>◯ CPU：—</span>
+        <span>▣ 内存：—</span>
+        <span>↑ — KB/s</span>
+        <span>↓ — KB/s</span>
+        <span className="status-spacer" />
+        <span>UTF-8⌄</span>
+        <button className="text-button" onClick={() => void refresh()}>♙</button>
       </footer>
 
       {showAudit && <AuditDrawer profiles={profiles} onClose={() => setShowAudit(false)} />}

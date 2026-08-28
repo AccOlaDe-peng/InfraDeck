@@ -44,12 +44,17 @@ export default function AiPanel(props: Props) {
   return (
     <aside className="ai-panel">
       <div className="sidebar-heading">
-        <p className="eyebrow">AI ASSISTANT</p>
+        <p className="sidebar-title">AI 助手</p>
         <span className="heading-actions">
           {!props.aiConfigured && <button className="tiny-button connect" onClick={props.onOpenSettings}>配置</button>}
           <button className="tiny-button" title="收起 AI 栏" onClick={props.onCollapse}>»</button>
         </span>
       </div>
+      <section className="ai-connection-card">
+        <div className="ai-card-heading"><strong>当前连接</strong><button className="text-button" onClick={props.onOpenSettings}>⚙</button></div>
+        <b><i className={`server-dot ${target ? 'online' : ''}`} />{target?.name ?? '未选择服务器'}</b>
+        {target && <><span>{target.host}:{target.port}</span><span>{target.username}@{target.name}</span></>}
+      </section>
       <div className="ai-context">
         <span className={`environment ${target?.environment ?? 'unknown'}`}>
           {target ? `上下文：${target.name}` : '上下文：未选择服务器'}
@@ -94,6 +99,17 @@ export default function AiPanel(props: Props) {
         ))}
         {!props.run && props.replay.length === 0 && <div className="ai-empty">向 AI 描述问题，例如「内存为什么这么高」。只读诊断自动执行，变更操作会先请求确认。</div>}
       </div>
+      <section className="system-overview">
+        <strong>系统概览</strong>
+        <label><span>CPU 使用率</span><span>等待采集</span></label><progress max="100" value="0" />
+        <label><span>内存使用率</span><span>等待采集</span></label><progress max="100" value="0" />
+        <div className="overview-row"><span>运行时间</span><span>—</span></div>
+        <div className="overview-row"><span>负载 (1/5/15m)</span><span>—</span></div>
+      </section>
+      <section className="ai-suggestions">
+        <span>需要我继续帮你查看哪些信息吗？</span>
+        <div><button onClick={() => props.onInput('查看磁盘使用情况')}>磁盘使用情况</button><button onClick={() => props.onInput('查看进程占用 TOP10')}>进程占用TOP10</button><button onClick={() => props.onInput('检查网络连接')}>网络连接</button></div>
+      </section>
       {props.approval && (
         <section className="approval-card">
           <p className="eyebrow">AI PROPOSAL · {props.approval.risk.level.toUpperCase()}</p>

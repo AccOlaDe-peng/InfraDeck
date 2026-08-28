@@ -19,6 +19,7 @@ interface Props {
   tabs: TerminalTab[];
   activePane?: WorkspacePane;
   profiles: ServerProfile[];
+  openViews: WorkspaceView[];
   onSelectTerminal: (tabId: string) => void;
   onCloseTerminal: (tabId: string) => void;
   onRenameTerminal: (tabId: string, title: string) => void;
@@ -62,7 +63,7 @@ export default function WorkspaceTabs(props: Props) {
           <button className="tab-close" onClick={(event) => { event.stopPropagation(); props.onCloseTerminal(tab.id); }}>×</button>
         </div>
       ))}
-      {(Object.keys(VIEW_LABELS) as WorkspaceView[]).map((view) => (
+      {props.openViews.map((view) => (
         <div
           key={view}
           className={`tab tab-view ${active?.kind === view ? 'active' : ''}`}

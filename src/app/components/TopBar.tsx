@@ -44,23 +44,21 @@ export default function TopBar(props: Props) {
 
   return (
     <header className="topbar" data-tauri-drag-region>
-      <div className="topbar-brand" data-tauri-drag-region>
-        <span className="topbar-logo">▣</span>
-        <span className="topbar-name">InfraDeck</span>
-      </div>
+      <div className="traffic-lights" aria-hidden="true"><i /><i /><i /></div>
       <div className="topbar-actions" data-tauri-drag-region>
-        <button className="topbar-btn" onClick={props.onAddServer}><span className="topbar-icon">＋</span>新建连接</button>
-        <button className="topbar-btn" disabled={!props.connected} onClick={props.onOpenTerminal}><span className="topbar-icon">▶</span>打开终端</button>
+        <button className="topbar-btn" onClick={props.onAddServer}><span className="topbar-icon">⌗</span>新建连接</button>
+        <button className="topbar-btn" disabled={!props.connected} onClick={props.onOpenTerminal}><span className="topbar-icon">▣</span>新建终端</button>
         <button
           className={`topbar-btn ${props.activeView === 'files' ? 'active' : ''}`}
           disabled={!props.connected}
           onClick={() => props.onView('files')}
-        ><span className="topbar-icon">▤</span>文件</button>
+        ><span className="topbar-icon">▱</span>文件传输</button>
         <button
           className={`topbar-btn ${props.activeView === 'containers' ? 'active' : ''}`}
           disabled={!props.connected}
           onClick={() => props.onView('containers')}
-        ><span className="topbar-icon">📦</span>容器</button>
+        ><span className="topbar-icon">▨</span>系统监控</button>
+        <button className="topbar-btn" onClick={props.onPalette}><span className="topbar-icon">⌁</span>命令工具</button>
         <div className="topbar-more" ref={moreRef}>
           <button className="topbar-btn" onClick={() => setMoreOpen((open) => !open)}>更多 ▾</button>
           {moreOpen && (
@@ -72,10 +70,9 @@ export default function TopBar(props: Props) {
           )}
         </div>
       </div>
-      <div className={`health-pill ${props.healthReady ? 'ready' : 'offline'}`}>
-        <span className="status-dot" />
-        {props.healthReady ? '已就绪' : '连接中'}
-      </div>
+      <button className="topbar-utility" title="通知">♧</button>
+      <button className="topbar-btn settings-shortcut" onClick={props.onSettings}>⚙ <span>设置</span></button>
+      <span className="user-avatar" aria-label="用户">●</span>
       {!isMac && (
         <div className="window-controls">
           <button className="window-btn" title="最小化" onClick={() => void getCurrentWindow().minimize()}>─</button>

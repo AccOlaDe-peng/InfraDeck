@@ -1,6 +1,9 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, AppError } from '../../lib/tauri';
-import { applyTheme, loadThemePreference, saveThemePreference, type ThemePreference } from '../../lib/theme';
+import {
+  applyTheme, loadAccentPreference, loadThemePreference, saveAccentPreference, saveThemePreference,
+  type AccentPreference, type ThemePreference,
+} from '../../lib/theme';
 import type { AiProviderSettings, AppSettings, PermissionMode } from '../../types/contracts';
 
 const MODE_LABELS: Array<{ value: PermissionMode; label: string; hint: string }> = [
@@ -19,6 +22,19 @@ const CATEGORIES: Array<{ id: SettingsCategory; label: string }> = [
   { id: 'permissions', label: '权限与隐私' },
 ];
 
+const THEMES: Array<{ value: ThemePreference; label: string; hint: string }> = [
+  { value: 'graphite', label: '石墨黑', hint: '贴近原型，沉稳且专注' },
+  { value: 'midnight', label: '深海蓝', hint: '更强的空间层次感' },
+  { value: 'light', label: '云雾白', hint: '适合明亮环境' },
+  { value: 'system', label: '跟随系统', hint: '随系统自动切换' },
+];
+
+const ACCENTS: Array<{ value: AccentPreference; label: string }> = [
+  { value: 'mint', label: '薄荷绿' },
+  { value: 'blue', label: '电光蓝' },
+  { value: 'violet', label: '星云紫' },
+];
+
 interface Props {
   provider?: AiProviderSettings;
   onNotify: (message: string) => void;
@@ -35,12 +51,14 @@ export default function SettingsView({ provider, onNotify, onSettingsChanged, on
   const [maxIterations, setMaxIterations] = useState(provider?.maxToolIterations ?? 8);
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('confirmChanges');
   const [conversationPersistence, setConversationPersistence] = useState(true);
-  const [theme, setTheme] = useState<ThemePreference>('dark');
+  const [theme, setTheme] = useState<ThemePreference>('graphite');
+  const [accent, setAccent] = useState<AccentPreference>('mint');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
   useEffect(() => {
     setTheme(loadThemePreference());
+    setAccent(loadAccentPreference());
     void (async () => {
       try {
         const settings = await api.getAppSettings();
@@ -56,6 +74,11 @@ export default function SettingsView({ provider, onNotify, onSettingsChanged, on
     setTheme(next);
     saveThemePreference(next);
     applyTheme(next);
+  };
+
+  const changeAccent = (next: AccentPreference) => {
+    setAccent(next);
+    saveAccentPreference(next);
   };
 
   const save = async (event: FormEvent) => {
@@ -92,14 +115,40 @@ export default function SettingsView({ provider, onNotify, onSettingsChanged, on
         {category === 'appearance' && (
           <>
             <h3>外观</h3>
-            <label>颜色主题
-              <select value={theme} onChange={(event) => changeTheme(event.target.value as ThemePreference)}>
-                <option value="dark">深色</option>
-                <option value="light">浅色</option>
-                <option value="system">跟随系统</option>
-              </select>
-            </label>
-            <p className="form-note">主题仅保存在本机（浏览器存储），不影响远端配置。</p>
+            <p className="settings-lead">选择整套界面风格，切换后立即应用到导航、工作区、终端边框与 AI 面板。</p>
+            <div className="theme-grid" role="radiogroup" aria-label="界面主题">
+              {THEMES.map((item) => (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === item.value}
+                  className={`theme-card theme-${item.value} ${theme === item.value ? 'active' : ''}`}
+                  key={item.value}
+                  onClick={() => changeTheme(item.value)}
+                >
+                  <span className="theme-preview"><i /><i /><i /></span>
+                  <strong>{item.label}</strong>
+                  <small>{item.hint}</small>
+                  <span className="theme-check">✓</span>
+                </button>
+              ))}
+            </div>
+            <div className="appearance-section">
+              <span className="appearance-label">强调色</span>
+              <div className="accent-options" role="radiogroup" aria-label="强调色">
+                {ACCENTS.map((item) => (
+                  <button
+                    type="button"
+                    role="radio"
+                    aria-checked={accent === item.value}
+                    className={`accent-option accent-${item.value} ${accent === item.value ? 'active' : ''}`}
+                    key={item.value}
+                    onClick={() => changeAccent(item.value)}
+                  ><span />{item.label}</button>
+                ))}
+              </div>
+            </div>
+            <p className="form-note">外观偏好仅保存在本机，不影响服务器与远端配置。</p>
           </>
         )}
         {category === 'ai' && (

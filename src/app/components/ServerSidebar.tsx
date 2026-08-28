@@ -43,19 +43,18 @@ export default function ServerSidebar(props: Props) {
   return (
     <aside className="sidebar">
       <div className="sidebar-heading">
-        <p className="eyebrow">SERVERS</p>
-        <button className="small-button connect" type="button" onClick={props.onAdd}>+ 添加</button>
+        <p className="sidebar-title">连接管理</p>
       </div>
       <input
         className="sidebar-search"
         value={query}
         onChange={(event) => setQuery(event.target.value)}
-        placeholder="搜索名称、地址、标签…"
+        placeholder="⌕  搜索服务器 / 备注（⌘K）"
       />
       {groups.length === 0 && <div className="sidebar-empty">没有匹配的服务器</div>}
       {groups.map((group) => (
         <section key={group.environment} className="server-group">
-          <p className="group-label">{ENVIRONMENT_LABELS[group.environment]}</p>
+          <p className="group-label"><span>⌄</span>{ENVIRONMENT_LABELS[group.environment]}（{group.items.length}）</p>
           {group.items.map((item) => {
             const connection = props.connections[item.id];
             const status = statusLabel(connection);
@@ -68,7 +67,7 @@ export default function ServerSidebar(props: Props) {
                 onClick={() => props.onSelect(item)}
               >
                 <div className="server-row-main">
-                  <strong>{item.name}</strong>
+                  <strong><i className={`server-dot ${connected ? 'online' : ''}`} />{item.name}</strong>
                   <span>{item.username}@{item.host}</span>
                 </div>
                 <span className={`server-status ${status.className}`}>{status.text}</span>
@@ -91,6 +90,7 @@ export default function ServerSidebar(props: Props) {
           })}
         </section>
       ))}
+      <button className="sidebar-add" type="button" onClick={props.onAdd}>＋ 新建连接</button>
     </aside>
   );
 }
