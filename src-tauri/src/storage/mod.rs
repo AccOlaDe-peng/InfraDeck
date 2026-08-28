@@ -48,6 +48,8 @@ impl Database {
             (1, include_str!("../../migrations/0001_initial.sql")),
             (2, include_str!("../../migrations/0002_v01_contracts.sql")),
             (3, include_str!("../../migrations/0003_tool_policy.sql")),
+            (4, include_str!("../../migrations/0004_ai_loop.sql")),
+            (5, include_str!("../../migrations/0005_ai_conversation.sql")),
         ];
         for (version, sql) in migrations.iter().filter(|(version, _)| *version > current) {
             let tx = self.conn.transaction()?;
@@ -301,6 +303,163 @@ impl Database {
         Ok(())
     }
 
+    /// Parameterized audit search; every condition is optional and AND-combined.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_audit(
+        &self,
+        server_id: Option<&str>,
+        actor: Option<&str>,
+        action: Option<&str>,
+        outcome: Option<&str>,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        until: Option<chrono::DateTime<chrono::Utc>>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<AuditEvent>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,timestamp,workspace_id,actor,server_id,connection_id,conversation_id,agent_run_id,action,tool_name,tool_version,tool_call_id,approval_id,risk_level,policy_action,outcome,arguments_digest,details_json FROM audit_events              WHERE (?1 IS NULL OR server_id = ?1)                AND (?2 IS NULL OR actor = ?2)                AND (?3 IS NULL OR action LIKE ?3 || '%')                AND (?4 IS NULL OR outcome = ?4)                AND (?5 IS NULL OR timestamp >= ?5)                AND (?6 IS NULL OR timestamp <= ?6)              ORDER BY timestamp DESC LIMIT ?7 OFFSET ?8",
+        )?;
+        let map_row = |row: &rusqlite::Row| -> rusqlite::Result<AuditEvent> {
+            let details: String = row.get(17)?;
+            Ok(AuditEvent {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                workspace_id: row.get(2)?,
+                actor: row.get(3)?,
+                server_id: row.get(4)?,
+                connection_id: row.get(5)?,
+                conversation_id: row.get(6)?,
+                agent_run_id: row.get(7)?,
+                action: row.get(8)?,
+                tool_name: row.get(9)?,
+                tool_version: row.get(10)?,
+                tool_call_id: row.get(11)?,
+                approval_id: row.get(12)?,
+                risk_level: row.get(13)?,
+                policy_action: row.get(14)?,
+                outcome: row.get(15)?,
+                arguments_digest: row.get(16)?,
+                sanitized_details: serde_json::from_str(&details).unwrap_or_default(),
+            })
+        };
+        let rows = stmt.query_map(
+            params![
+                server_id,
+                actor,
+                action,
+                outcome,
+                since.map(|value| value.to_rfc3339()),
+                until.map(|value| value.to_rfc3339()),
+                limit,
+                offset,
+            ],
+            map_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn create_conversation(
+        &self,
+        conversation: &crate::ai::conversation::AiConversationDto,
+    ) -> Result<(), AppError> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO ai_conversations(id,title,server_id,created_at,updated_at,message_count,status) VALUES (?1,?2,?3,?4,?5,0,'active')",
+            params![conversation.id, conversation.title, conversation.server_id, conversation.created_at, conversation.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn append_message(
+        &self,
+        message: &crate::ai::conversation::AiMessageDto,
+    ) -> Result<(), AppError> {
+        let tool_calls_json = match &message.tool_calls {
+            Some(calls) => Some(
+                serde_json::to_string(calls)
+                    .map_err(|error| AppError::Internal(error.to_string()))?,
+            ),
+            None => None,
+        };
+        self.conn.execute(
+            "INSERT OR IGNORE INTO ai_messages(id,conversation_id,seq,role,content,tool_call_id,tool_calls_json,agent_run_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                message.id,
+                message.conversation_id,
+                message.seq,
+                message.role,
+                message.content,
+                message.tool_call_id,
+                tool_calls_json,
+                message.agent_run_id,
+                message.created_at,
+            ],
+        )?;
+        self.conn.execute(
+            "UPDATE ai_conversations SET updated_at=?2, message_count=(SELECT COUNT(*) FROM ai_messages WHERE conversation_id=?1) WHERE id=?1",
+            params![message.conversation_id, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_conversations(
+        &self,
+        query: &crate::ai::conversation::ConversationListQuery,
+    ) -> Result<Vec<crate::ai::conversation::AiConversationDto>, AppError> {
+        let query = query.clone().normalized();
+        let mut stmt = self.conn.prepare(
+            "SELECT id,title,server_id,created_at,updated_at,message_count,status FROM ai_conversations              WHERE (?1 IS NULL OR server_id = ?1) AND (?2 IS NULL OR lower(title) LIKE '%' || ?2 || '%')              ORDER BY updated_at DESC LIMIT ?3 OFFSET ?4",
+        )?;
+        let rows = stmt.query_map(
+            params![query.server_id, query.query, query.limit, query.offset],
+            |row| {
+                Ok(crate::ai::conversation::AiConversationDto {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    server_id: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    message_count: row.get::<_, i64>(5)?.max(0) as u32,
+                    status: row.get(6)?,
+                })
+            },
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn list_messages(
+        &self,
+        conversation_id: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<crate::ai::conversation::AiMessageDto>, AppError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id,conversation_id,seq,role,content,tool_call_id,tool_calls_json,agent_run_id,created_at              FROM ai_messages WHERE conversation_id=?1 ORDER BY seq ASC LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, limit.min(1000), offset], |row| {
+            let tool_calls_json: Option<String> = row.get(6)?;
+            Ok(crate::ai::conversation::AiMessageDto {
+                id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                seq: row.get::<_, i64>(2)?.max(0) as u32,
+                role: row.get(3)?,
+                content: row.get(4)?,
+                tool_call_id: row.get(5)?,
+                tool_calls: tool_calls_json.and_then(|value| serde_json::from_str(&value).ok()),
+                agent_run_id: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    pub fn delete_conversation(&self, conversation_id: &str) -> Result<bool, AppError> {
+        let changed = self.conn.execute(
+            "DELETE FROM ai_conversations WHERE id=?1",
+            [conversation_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn expire_stale_approvals(&self) -> Result<usize, AppError> {
         self.conn.execute("UPDATE approvals SET status='expired',resolved_at=?1 WHERE status IN ('pending','approved')", [Utc::now().to_rfc3339()]).map_err(AppError::from)
     }
@@ -310,6 +469,145 @@ impl Database {
 mod tests {
     use super::*;
     use uuid::Uuid;
+    #[test]
+    fn conversation_and_messages_round_trip() {
+        let db = Database::open(":memory:").expect("db");
+        let conversation = crate::ai::conversation::AiConversationDto {
+            id: Uuid::new_v4().to_string(),
+            title: "内存为什么这么高".into(),
+            server_id: Some("srv".into()),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+            message_count: 0,
+            status: "active".into(),
+        };
+        db.create_conversation(&conversation).expect("create");
+        for seq in 0..3u32 {
+            let message = crate::ai::conversation::AiMessageDto {
+                id: Uuid::new_v4().to_string(),
+                conversation_id: conversation.id.clone(),
+                seq,
+                role: if seq == 0 {
+                    "user".into()
+                } else {
+                    "tool".into()
+                },
+                content: Some(format!("message-{seq}")),
+                tool_call_id: (seq > 0).then(|| format!("call_{seq}")),
+                tool_calls: None,
+                agent_run_id: None,
+                created_at: Utc::now().to_rfc3339(),
+            };
+            db.append_message(&message).expect("append");
+            // Idempotent replay must not duplicate (UNIQUE seq).
+            db.append_message(&message).expect("replay");
+        }
+        let listed = db
+            .list_conversations(&crate::ai::conversation::ConversationListQuery {
+                server_id: Some("srv".into()),
+                query: Some("内存".into()),
+                limit: None,
+                offset: None,
+            })
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].message_count, 3, "count stays deduplicated");
+        let messages = db.list_messages(&conversation.id, 10, 0).expect("messages");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].seq, 0);
+        assert!(db.delete_conversation(&conversation.id).expect("delete"));
+        assert!(db
+            .list_messages(&conversation.id, 10, 0)
+            .expect("empty")
+            .is_empty());
+    }
+
+    #[test]
+    fn query_audit_filters_and_paginates() {
+        let db = Database::open(":memory:").expect("db");
+        let mut event = crate::tools::AuditEvent {
+            id: Uuid::new_v4().to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            workspace_id: "default".into(),
+            actor: "ai".into(),
+            server_id: Some("srv-a".into()),
+            connection_id: None,
+            conversation_id: None,
+            agent_run_id: None,
+            action: "tool.execute".into(),
+            tool_name: Some("system.memory".into()),
+            tool_version: Some("1.0.0".into()),
+            tool_call_id: Some(Uuid::new_v4().to_string()),
+            approval_id: None,
+            risk_level: Some("safe".into()),
+            policy_action: Some("allow".into()),
+            outcome: "success".into(),
+            arguments_digest: None,
+            sanitized_details: serde_json::Map::new(),
+        };
+        db.append_audit(&event).expect("append");
+        event.id = Uuid::new_v4().to_string();
+        event.actor = "user".into();
+        event.action = "approval.resolve".into();
+        event.outcome = "denied".into();
+        db.append_audit(&event).expect("append 2");
+
+        let hits = db
+            .query_audit(Some("srv-a"), None, None, None, None, None, 10, 0)
+            .expect("by server");
+        assert_eq!(hits.len(), 2);
+        let denied = db
+            .query_audit(None, None, None, Some("denied"), None, None, 10, 0)
+            .expect("by outcome");
+        assert_eq!(denied.len(), 1);
+        assert_eq!(denied[0].action, "approval.resolve");
+        let prefix = db
+            .query_audit(None, None, Some("approval."), None, None, None, 10, 0)
+            .expect("prefix");
+        assert_eq!(prefix.len(), 1);
+        let page = db
+            .query_audit(None, None, None, None, None, None, 1, 1)
+            .expect("page");
+        assert_eq!(page.len(), 1);
+        // since=1999 matches everything; since in the far future matches nothing.
+        assert_eq!(
+            db.query_audit(
+                None,
+                None,
+                None,
+                None,
+                Some(
+                    chrono::DateTime::parse_from_rfc3339("1999-01-01T00:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                ),
+                None,
+                10,
+                0
+            )
+            .expect("since all")
+            .len(),
+            2
+        );
+        assert!(db
+            .query_audit(
+                None,
+                None,
+                None,
+                None,
+                Some(
+                    chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                ),
+                None,
+                10,
+                0
+            )
+            .expect("since future")
+            .is_empty());
+    }
+
     #[test]
     fn migrates_and_round_trips_server_profile() {
         let mut db = Database::open(":memory:").expect("database");

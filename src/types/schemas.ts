@@ -27,6 +27,30 @@ export const appErrorSchema = z.object({
   details: z.record(z.unknown()).optional(),
 });
 
+export const conversationListQuerySchema = z.object({
+  serverId: z.string().uuid().optional(),
+  query: z.string().trim().min(1).optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+  offset: z.number().int().min(0).optional(),
+});
+
+export const batchToolCallSchema = z.object({
+  batchId: z.string().uuid(),
+  calls: z.array(z.object({ id: z.string().uuid() }).passthrough()).min(1).max(10),
+  requestedAt: z.string().min(1),
+});
+
+export const auditQuerySchema = z.object({
+  serverId: z.string().optional(),
+  actor: z.enum(['user', 'ai', 'system']).optional(),
+  action: z.string().trim().min(1).optional(),
+  outcome: z.enum(['success', 'failed', 'denied', 'cancelled', 'running']).optional(),
+  since: z.string().optional(),
+  until: z.string().optional(),
+  limit: z.number().int().min(1).max(500).optional(),
+  offset: z.number().int().min(0).optional(),
+});
+
 export const aiProviderSettingsInputSchema = z.object({
   providerKind: z.literal('openaiCompatible').optional(),
   baseUrl: z.string().trim().regex(/^https?:\/\//, 'baseUrl must start with http:// or https://'),

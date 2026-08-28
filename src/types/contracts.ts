@@ -149,6 +149,13 @@ export interface AuditEvent { id: string; timestamp: string; workspaceId: string
 export interface AiProviderSettings { providerKind: string; baseUrl: string; model: string; apiKeyCredentialId?: string; maxToolIterations: number; maxToolOutputChars: number; updatedAt: string; }
 export interface AiProviderSettingsInput { providerKind?: string; baseUrl: string; model: string; apiKey?: string; apiKeyCredentialId?: string; maxToolIterations?: number; maxToolOutputChars?: number; }
 export interface AgentRequest { serverId: ServerId; message: string; conversationId?: string; }
+export interface AiConversation { id: string; title: string; serverId?: string; createdAt: string; updatedAt: string; messageCount: number; status: 'active' | 'archived'; }
+export interface AiMessage { id: string; conversationId: string; seq: number; role: 'user' | 'assistant' | 'tool' | 'system'; content?: string; toolCallId?: string; toolCalls?: Array<{ id: string; name: string; arguments: string }>; agentRunId?: string; createdAt: string; }
+export interface ConversationListQuery { serverId?: string; query?: string; limit?: number; offset?: number; }
+export interface BatchToolCall { batchId: string; calls: ToolCall[]; requestedAt: string; }
+export interface BatchItem { callId: string; status: ToolResult['status'] | 'waitingApproval'; result?: ToolResult; approval?: ApprovalRequest; }
+export interface BatchToolResponse { batchId: string; items: BatchItem[]; status: 'completed' | 'waitingApproval'; }
+export interface AuditQuery { serverId?: string; actor?: 'user' | 'ai' | 'system'; action?: string; outcome?: 'success' | 'failed' | 'denied' | 'cancelled' | 'running'; since?: string; until?: string; limit?: number; offset?: number; }
 export interface AgentToolStep { toolCallId: string; name: string; input: unknown; status: 'success' | 'failed' | 'denied' | 'partial' | 'waitingApproval' | 'cancelled' | string; summary?: string; }
 export interface AgentChatMessage { role: string; content?: string; toolCallId?: string; }
 export type AgentRunStatus = 'completed' | 'waitingApproval' | 'failed' | 'cancelled';

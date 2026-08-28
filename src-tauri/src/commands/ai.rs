@@ -115,16 +115,19 @@ pub async fn agent_send(
         return Err(AppError::Validation("消息不能为空".into()));
     }
     let profile = profile_summary(&state, &request.server_id)?;
+    let conversation_id = request
+        .conversation_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let run = AgentRunState {
         run_id: Uuid::new_v4().to_string(),
-        conversation_id: request
-            .conversation_id
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        conversation_id: conversation_id.clone(),
         server_id: request.server_id.clone(),
+        title: crate::ai::conversation::conversation_title(&request.message),
         messages: vec![ChatMessage::user(request.message)],
         steps: Vec::new(),
         pending_tool_call_id: None,
         iterations: 0,
+        persisted_seq: 0,
         token: tokio_util::sync::CancellationToken::new(),
     };
     state
@@ -135,6 +138,7 @@ pub async fn agent_send(
     info_agent_audit(&state, &run, "agent.run", "running");
     let mut run = run;
     let outcome = run_loop(&state, &mut run, &settings, &profile).await;
+    persist_run_messages(&state, &mut run);
     if outcome.status != "waitingApproval" {
         state
             .ai_runs
@@ -201,6 +205,7 @@ pub async fn agent_resume(
         tool_message_content(&result, settings.max_tool_output_chars),
     ));
     let outcome = run_loop(&state, &mut run, &settings, &profile).await;
+    persist_run_messages(&state, &mut run);
     if outcome.status == "waitingApproval" {
         state
             .ai_runs
@@ -226,6 +231,125 @@ pub fn agent_cancel(state: State<'_, AppState>, run_id: String) -> Result<bool, 
         }
         None => Ok(false),
     }
+}
+
+/// Writes new messages since the last checkpoint to ai_messages, honoring the
+/// conversationPersistence setting (off = metadata only, fail-closed).
+pub(crate) fn persist_run_messages(state: &AppState, run: &mut AgentRunState) {
+    let Ok(db) = state.db.lock() else { return };
+    let enabled = db
+        .app_settings()
+        .map(|settings| settings.conversation_persistence)
+        .unwrap_or(true);
+    let now = Utc::now().to_rfc3339();
+    let conversation = crate::ai::conversation::AiConversationDto {
+        id: run.conversation_id.clone(),
+        title: run.title.clone(),
+        server_id: Some(run.server_id.clone()),
+        created_at: now.clone(),
+        updated_at: now,
+        message_count: 0,
+        status: "active".into(),
+    };
+    if let Err(error) = db.create_conversation(&conversation) {
+        tracing::warn!(target: "infradeck::conversation", error = %error, "persist conversation failed");
+        return;
+    }
+    if !enabled {
+        return;
+    }
+    for (index, message) in run
+        .messages
+        .iter()
+        .enumerate()
+        .skip(run.persisted_seq as usize)
+    {
+        let dto = crate::ai::conversation::message_dto(
+            &run.conversation_id,
+            index as u32,
+            message,
+            Some(&run.run_id),
+        );
+        if let Err(error) = db.append_message(&dto) {
+            tracing::warn!(target: "infradeck::conversation", error = %error, seq = index, "persist message failed");
+            return;
+        }
+        run.persisted_seq = index as u32 + 1;
+    }
+}
+
+#[tauri::command]
+#[instrument(skip(state, query), target = "infradeck::conversation")]
+pub fn ai_conversations_list(
+    state: State<'_, AppState>,
+    query: Option<crate::ai::conversation::ConversationListQuery>,
+) -> Result<Vec<crate::ai::conversation::AiConversationDto>, AppError> {
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .list_conversations(
+            &query.unwrap_or(crate::ai::conversation::ConversationListQuery {
+                server_id: None,
+                query: None,
+                limit: None,
+                offset: None,
+            }),
+        )
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::conversation")]
+pub fn ai_messages_list(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<crate::ai::conversation::AiMessageDto>, AppError> {
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .list_messages(&conversation_id, limit.unwrap_or(200), offset.unwrap_or(0))
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::conversation")]
+pub fn ai_conversation_delete(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> Result<bool, AppError> {
+    let deleted = state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .delete_conversation(&conversation_id)?;
+    let event = AuditEvent {
+        id: Uuid::new_v4().to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        workspace_id: "default".into(),
+        actor: "user".into(),
+        server_id: None,
+        connection_id: None,
+        conversation_id: Some(conversation_id),
+        agent_run_id: None,
+        action: "ai.conversation.delete".into(),
+        tool_name: None,
+        tool_version: None,
+        tool_call_id: None,
+        approval_id: None,
+        risk_level: None,
+        policy_action: None,
+        outcome: "success".into(),
+        arguments_digest: None,
+        sanitized_details: serde_json::Map::new(),
+    };
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .append_audit(&event)?;
+    Ok(deleted)
 }
 
 fn configured_settings(state: &AppState) -> Result<AiProviderSettings, AppError> {

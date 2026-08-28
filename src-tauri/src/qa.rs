@@ -789,10 +789,12 @@ fn agent_run(server_id: &str) -> AgentRunState {
         run_id: Uuid::new_v4().to_string(),
         conversation_id: Uuid::new_v4().to_string(),
         server_id: server_id.into(),
+        title: "内存为什么这么高？".into(),
         messages: vec![ChatMessage::user("内存为什么这么高？")],
         steps: Vec::new(),
         pending_tool_call_id: None,
         iterations: 0,
+        persisted_seq: 0,
         token: CancellationToken::new(),
     }
 }
@@ -968,6 +970,222 @@ fn untrusted_output_with_injection_and_secrets_is_sanitized() {
     // Fail closed: any secret-bearing output is redacted wholesale.
     let sanitized = crate::ai::sanitize_tool_output(hostile, 10_000);
     assert_eq!(sanitized, "[REDACTED]");
+}
+
+// ---------------------------------------------------------------------------
+// M7: batch execution — mixed policy outcomes, per-call approvals, limits.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn batch_mixed_policy_partial_execution() {
+    let h = harness(vec![
+        stdout(MEMINFO),
+        stdout(MEMINFO),
+        stdout(restart_verified()),
+    ]);
+    let profile = profile("srv-batch", Environment::Dev, "dev");
+    h.state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_server(&h, &profile).await;
+
+    let batch = commands::BatchToolCall {
+        batch_id: Uuid::new_v4().to_string(),
+        requested_at: Utc::now().to_rfc3339(),
+        calls: vec![
+            call("system.memory", serde_json::json!({}), server("srv-batch")),
+            call("system.memory", serde_json::json!({}), server("srv-batch")),
+            call(
+                "shell.execute",
+                serde_json::json!({"command":"rm -rf /","timeoutMs":5000,"purpose":"cleanup"}),
+                server("srv-batch"),
+            ),
+            call(
+                "service.restart",
+                serde_json::json!({"service":"nginx"}),
+                ResourceTarget::Service {
+                    server_id: "srv-batch".into(),
+                    service: "nginx".into(),
+                },
+            ),
+        ],
+    };
+    let response = commands::run_batch_tool_execute(&h.state, batch)
+        .await
+        .expect("batch");
+    assert_eq!(response.status, "waitingApproval");
+    assert_eq!(response.items.len(), 4);
+    assert_eq!(response.items[0].status, "success");
+    assert_eq!(response.items[1].status, "success");
+    assert_eq!(
+        response.items[2].status, "denied",
+        "hard-blocked shell.execute is denied in-place"
+    );
+    let approval = response.items[3]
+        .approval
+        .as_ref()
+        .expect("per-call approval");
+    assert_eq!(
+        approval.required_confirmation,
+        crate::policy::RequiredConfirmation::TypeTarget
+    );
+
+    // Resolving the pending approval through the normal path executes and verifies.
+    let granted = expect_result(
+        commands::resolve_approval(
+            &h.state,
+            ApprovalGrant {
+                approval_id: approval.approval_id.clone(),
+                request_hash: approval.request_hash.clone(),
+                decision: crate::policy::ApprovalDecision::Approve,
+                typed_confirmation: Some("srv-batch/nginx".into()),
+            },
+        )
+        .await
+        .expect("resolve"),
+    );
+    assert_eq!(granted.status, "success");
+    let audit = h
+        .state
+        .db
+        .lock()
+        .expect("db")
+        .list_audit(50)
+        .expect("audit");
+    assert!(audit.iter().any(|event| event.action == "batch.execute"));
+}
+
+#[tokio::test]
+async fn batch_rejects_more_than_ten_calls() {
+    let h = harness(vec![]);
+    let batch = commands::BatchToolCall {
+        batch_id: Uuid::new_v4().to_string(),
+        requested_at: Utc::now().to_rfc3339(),
+        calls: (0..11)
+            .map(|_| {
+                call(
+                    "system.memory",
+                    serde_json::json!({}),
+                    server("srv-batch-limit"),
+                )
+            })
+            .collect(),
+    };
+    let error = commands::run_batch_tool_execute(&h.state, batch)
+        .await
+        .expect_err("over-limit rejected");
+    assert!(matches!(error, crate::error::AppError::Validation(_)));
+}
+
+// ---------------------------------------------------------------------------
+// M6: conversation persistence (on / privacy-off).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn agent_run_persists_conversation_and_messages() {
+    let h = harness(vec![stdout(MEMINFO)]);
+    let profile = profile("srv-persist", Environment::Dev, "dev");
+    h.state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    connect_server(&h, &profile).await;
+
+    let llm = ScriptedLlmProvider::new(vec![
+        ScriptedLlmProvider::tool_calls(&[("system.memory", "{}")]),
+        ScriptedLlmProvider::assistant_text("内存使用率 90%。"),
+    ]);
+    let mut run = agent_run("srv-persist");
+    let outcome =
+        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(4), &profile, &llm)
+            .await;
+    assert_eq!(outcome.status, "completed");
+    commands::ai::persist_run_messages(&h.state, &mut run);
+
+    let db = h.state.db.lock().expect("db");
+    let conversations = db
+        .list_conversations(&crate::ai::conversation::ConversationListQuery {
+            server_id: Some("srv-persist".into()),
+            query: None,
+            limit: None,
+            offset: None,
+        })
+        .expect("conversations");
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0].title, "内存为什么这么高？");
+    assert_eq!(
+        conversations[0].message_count, 4,
+        "user + assistant(tool_calls) + tool + final"
+    );
+    let messages = db
+        .list_messages(&conversations[0].id, 10, 0)
+        .expect("messages");
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0].role, "user");
+    let tool_message = messages
+        .iter()
+        .find(|m| m.role == "tool")
+        .expect("tool message");
+    assert!(tool_message
+        .content
+        .as_deref()
+        .expect("content")
+        .contains("usedPercent"));
+    assert_eq!(run.persisted_seq, 4);
+}
+
+#[tokio::test]
+async fn persistence_off_writes_metadata_only() {
+    let h = harness(vec![stdout(MEMINFO)]);
+    let profile = profile("srv-nopersist", Environment::Dev, "dev");
+    h.state
+        .db
+        .lock()
+        .expect("db")
+        .upsert_server_profile(&profile)
+        .expect("profile");
+    h.state
+        .db
+        .lock()
+        .expect("db")
+        .save_app_settings(
+            &crate::config::AppSettings {
+                conversation_persistence: false,
+                ..Default::default()
+            },
+            false,
+        )
+        .expect("settings");
+    connect_server(&h, &profile).await;
+
+    let llm = ScriptedLlmProvider::new(vec![ScriptedLlmProvider::assistant_text("仅元数据。")]);
+    let mut run = agent_run("srv-nopersist");
+    let outcome =
+        commands::ai::run_loop_with_provider(&h.state, &mut run, &ai_settings(4), &profile, &llm)
+            .await;
+    assert_eq!(outcome.status, "completed");
+    commands::ai::persist_run_messages(&h.state, &mut run);
+
+    let db = h.state.db.lock().expect("db");
+    let conversations = db
+        .list_conversations(&crate::ai::conversation::ConversationListQuery {
+            server_id: Some("srv-nopersist".into()),
+            query: None,
+            limit: None,
+            offset: None,
+        })
+        .expect("conversations");
+    assert_eq!(conversations.len(), 1, "metadata still recorded");
+    assert_eq!(conversations[0].message_count, 0);
+    assert!(db
+        .list_messages(&conversations[0].id, 10, 0)
+        .expect("no messages")
+        .is_empty());
 }
 
 // ---------------------------------------------------------------------------

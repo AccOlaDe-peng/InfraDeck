@@ -541,6 +541,186 @@ pub fn app_settings_save(
     Ok(settings)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditQuery {
+    pub server_id: Option<String>,
+    pub actor: Option<String>,
+    pub action: Option<String>,
+    pub outcome: Option<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+fn parse_rfc3339(value: &str, field: &str) -> Result<DateTime<Utc>, AppError> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|parsed| parsed.with_timezone(&Utc))
+        .map_err(|_| AppError::Validation(format!("{field} 必须是 RFC 3339 时间戳")))
+}
+
+// ---------------------------------------------------------------------------
+// Batch tool execution (V0.2 Epic J)
+// ---------------------------------------------------------------------------
+
+pub const MAX_BATCH_CALLS: usize = 10;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchToolCall {
+    pub batch_id: String,
+    pub calls: Vec<ToolCall>,
+    /// Reserved for replay protection once batches persist (V1); wire-compatible.
+    #[allow(dead_code)]
+    pub requested_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchItem {
+    pub call_id: String,
+    pub status: String,
+    pub result: Option<ToolResult>,
+    pub approval: Option<crate::policy::ApprovalRequest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchToolResponse {
+    pub batch_id: String,
+    pub items: Vec<BatchItem>,
+    pub status: String,
+}
+
+/// Batch execution never loosens per-call safety: every call walks the same
+/// Tool → Policy path; Deny marks the item denied, Allow executes immediately,
+/// Confirm creates its own ApprovalRequest (per-call approvals, never one
+/// batch-wide vote). Read-only Allow items run even when approvals are pending.
+#[tauri::command]
+#[instrument(skip(state, batch), target = "infradeck::tool")]
+pub async fn batch_tool_execute(
+    state: tauri::State<'_, AppState>,
+    batch: BatchToolCall,
+) -> Result<BatchToolResponse, AppError> {
+    run_batch_tool_execute(state.inner(), batch).await
+}
+
+pub(crate) async fn run_batch_tool_execute(
+    state: &AppState,
+    batch: BatchToolCall,
+) -> Result<BatchToolResponse, AppError> {
+    if Uuid::parse_str(&batch.batch_id).is_err() {
+        return Err(AppError::Validation("batchId 必须是 UUID".into()));
+    }
+    if batch.calls.is_empty() || batch.calls.len() > MAX_BATCH_CALLS {
+        return Err(AppError::Validation(format!(
+            "批量调用数量必须在 1-{MAX_BATCH_CALLS} 之间"
+        )));
+    }
+    let mut items = Vec::with_capacity(batch.calls.len());
+    let (mut approved, mut denied, mut failed) = (0usize, 0usize, 0usize);
+    for call in &batch.calls {
+        let response = execute_tool(state, call.clone(), "user").await?;
+        match response {
+            ToolExecutionResponse::Result { result } => {
+                let status = result.status.clone();
+                match status.as_str() {
+                    "success" | "partial" => approved += 1,
+                    "denied" => denied += 1,
+                    _ => failed += 1,
+                }
+                items.push(BatchItem {
+                    call_id: call.id.clone(),
+                    status,
+                    result: Some(result),
+                    approval: None,
+                });
+            }
+            ToolExecutionResponse::ApprovalRequired { approval } => {
+                items.push(BatchItem {
+                    call_id: call.id.clone(),
+                    status: "waitingApproval".into(),
+                    result: None,
+                    approval: Some(approval),
+                });
+            }
+        }
+    }
+    let status = if items.iter().any(|item| item.status == "waitingApproval") {
+        "waitingApproval"
+    } else {
+        "completed"
+    };
+    let event = AuditEvent {
+        id: Uuid::new_v4().to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        workspace_id: "default".into(),
+        actor: "user".into(),
+        server_id: None,
+        connection_id: None,
+        conversation_id: None,
+        agent_run_id: None,
+        action: "batch.execute".into(),
+        tool_name: None,
+        tool_version: None,
+        tool_call_id: None,
+        approval_id: None,
+        risk_level: None,
+        policy_action: None,
+        // audit_events.outcome CHECK allows success|failed|denied|cancelled|partial;
+        // a batch paused on approvals is recorded as "partial".
+        outcome: if status == "completed" { "success" } else { "partial" }.into(),
+        arguments_digest: None,
+        sanitized_details: serde_json::json!({"batchId": batch.batch_id, "total": batch.calls.len(), "approved": approved, "denied": denied, "failed": failed})
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+    };
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .append_audit(&event)?;
+    Ok(BatchToolResponse {
+        batch_id: batch.batch_id,
+        items,
+        status: status.into(),
+    })
+}
+
+#[tauri::command]
+#[instrument(skip(state, query), target = "infradeck::audit")]
+pub fn audit_events_query(
+    state: State<'_, AppState>,
+    query: AuditQuery,
+) -> Result<Vec<AuditEvent>, AppError> {
+    let since = match query.since.as_deref() {
+        Some(value) => Some(parse_rfc3339(value, "since")?),
+        None => None,
+    };
+    let until = match query.until.as_deref() {
+        Some(value) => Some(parse_rfc3339(value, "until")?),
+        None => None,
+    };
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let offset = query.offset.unwrap_or(0);
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .query_audit(
+            query.server_id.as_deref(),
+            query.actor.as_deref(),
+            query.action.as_deref(),
+            query.outcome.as_deref(),
+            since,
+            until,
+            limit,
+            offset,
+        )
+}
+
 #[tauri::command]
 pub fn audit_events_list(
     state: State<'_, AppState>,

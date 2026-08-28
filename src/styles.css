@@ -97,3 +97,26 @@ footer { margin-top: 22px; color: #667b98; font-size: 11px; }.text-button { bord
 .ai-step-status.failed, .ai-step-status.denied, .ai-step-status.cancelled { background: rgba(220, 70, 70, 0.15); color: #c4453f; }
 .ai-step-status.waitingApproval, .ai-step-status.partial { background: rgba(230, 170, 50, 0.18); color: #b98a1f; }
 .ai-final { white-space: pre-wrap; font-size: 14px; line-height: 1.6; padding: 10px 12px; border-radius: 8px; background: rgba(110, 130, 255, 0.08); }
+
+/* M6 conversations + audit */
+.ai-conversations { display: flex; gap: 6px; align-items: center; }
+.ai-conversations select { margin: 0; flex: 1; min-width: 0; }
+.ai-replay { margin: 0; font-size: 12px; line-height: 1.6; padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; }
+.ai-replay-user { background: rgba(93, 157, 236, 0.12); }
+.ai-replay-assistant { background: rgba(110, 130, 255, 0.08); }
+.ai-replay-system { color: #7e94b6; }
+.audit-modal { width: min(760px, calc(100% - 40px)); }
+.audit-filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.audit-filters select, .audit-filters input { margin: 0; flex: 1; min-width: 90px; font-size: 11px; padding: 7px 8px; }
+.audit-list { display: flex; flex-direction: column; gap: 4px; max-height: 52vh; overflow-y: auto; }
+.audit-item { border: 1px solid #2a3c53; border-radius: 8px; padding: 7px 9px; cursor: pointer; }
+.audit-row { display: flex; align-items: center; gap: 9px; font-size: 11px; color: #b9cce4; }
+.audit-row code { color: #d7e3f4; }
+.audit-meta { color: #7e94b6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-row small { margin-left: auto; color: #667b98; white-space: nowrap; }
+.audit-outcome { font-size: 9px; border-radius: 999px; padding: 2px 7px; text-transform: uppercase; }
+.audit-outcome.success { color: #7de0c2; background: #14382f; }
+.audit-outcome.failed { color: #ffb5ad; background: #402733; }
+.audit-outcome.denied { color: #e8c687; background: #3a3018; }
+.audit-outcome.cancelled, .audit-outcome.running { color: #8299b8; background: #1a2941; }
+.audit-details { margin: 7px 0 0; font-size: 10px; color: #9db0c8; background: #0b1420; border-radius: 6px; padding: 8px; overflow-x: auto; }

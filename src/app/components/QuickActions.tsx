@@ -1,14 +1,17 @@
+import { useState } from 'react';
 import { TOOL_COMMANDS, type ToolCommandMeta } from '../../lib/commandMeta';
 import type { ServerProfile } from '../../types/contracts';
 
 interface Props {
   server?: ServerProfile;
+  connectedCount: number;
   busy: boolean;
-  onRun: (command: ToolCommandMeta, service: string) => void;
+  onRun: (command: ToolCommandMeta, service: string, batch: boolean) => void;
 }
 
-/** One-click structured tools above the terminal area. */
-export default function QuickActions({ server, busy, onRun }: Props) {
+/** One-click structured tools above the terminal area, with an optional batch mode. */
+export default function QuickActions({ server, connectedCount, busy, onRun }: Props) {
+  const [batch, setBatch] = useState(false);
   if (!server) return null;
   const run = (command: ToolCommandMeta) => {
     let service = '';
@@ -16,7 +19,7 @@ export default function QuickActions({ server, busy, onRun }: Props) {
       service = window.prompt('输入 systemd 服务名（例如 nginx）')?.trim() ?? '';
       if (!service) return;
     }
-    onRun(command, service);
+    onRun(command, service, batch);
   };
   return (
     <div className="quick-actions">
@@ -26,7 +29,13 @@ export default function QuickActions({ server, busy, onRun }: Props) {
           {command.title}
         </button>
       ))}
-      <span className="quick-target">目标：{server.name}</span>
+      {connectedCount > 1 && (
+        <label className="checkbox-row batch-toggle">
+          <input type="checkbox" checked={batch} onChange={(event) => setBatch(event.target.checked)} />
+          应用到全部已连接（{connectedCount}）
+        </label>
+      )}
+      <span className="quick-target">{batch ? `批量 → ${connectedCount} 台` : `目标：${server.name}`}</span>
     </div>
   );
 }

@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, AppError } from '../lib/tauri';
 import { TOOL_COMMANDS, buildTarget, type ToolCommandMeta } from '../lib/commandMeta';
 import type {
-  AgentRunDto, AiProviderSettings, ApprovalRequest, AppSettings, ConnectionDto,
-  HealthCheckDto, ServerProfile, ToolResult,
+  AgentRunDto, AiConversation, AiMessage, AiProviderSettings, ApprovalRequest, AppSettings,
+  ConnectionDto, HealthCheckDto, ServerProfile, ToolResult,
 } from '../types/contracts';
 import ServerSidebar from './components/ServerSidebar';
 import TerminalTabs, { type TerminalTab } from './components/TerminalTabs';
@@ -12,6 +12,7 @@ import QuickActions from './components/QuickActions';
 import SettingsDialog from './components/SettingsDialog';
 import CommandPalette, { type PaletteCommand } from './components/CommandPalette';
 import ProfileForm from './components/ProfileForm';
+import AuditDrawer from './components/AuditDrawer';
 
 type HostKeyPrompt = { serverId: string; host: string; port: number; algorithm: string; fingerprintSha256: string };
 
@@ -39,6 +40,7 @@ export default function App() {
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string }>();
   const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt>();
   const [userApproval, setUserApproval] = useState<ApprovalRequest>();
+  const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([]);
 
   const [aiRun, setAiRun] = useState<AgentRunDto>();
   const [aiApproval, setAiApproval] = useState<ApprovalRequest>();
@@ -50,6 +52,10 @@ export default function App() {
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [editingProfile, setEditingProfile] = useState<ServerProfile>();
   const [showSettings, setShowSettings] = useState(false);
+  const [showAudit, setShowAudit] = useState(false);
+  const [aiConversations, setAiConversations] = useState<AiConversation[]>([]);
+  const [aiConversationId, setAiConversationId] = useState<string>();
+  const [aiReplay, setAiReplay] = useState<AiMessage[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [lastToolResult, setLastToolResult] = useState<ToolResult>();
 
@@ -70,6 +76,36 @@ export default function App() {
   };
 
   useEffect(() => { void refresh(); }, []);
+
+  const loadConversations = async (serverId?: string) => {
+    try { setAiConversations(await api.listConversations(serverId ? { serverId } : {})); }
+    catch { /* conversation list is best-effort */ }
+  };
+
+  useEffect(() => { void loadConversations(selectedServerId); }, [selectedServerId]);
+
+  const selectConversation = async (conversationId: string) => {
+    if (!conversationId) {
+      setAiConversationId(undefined);
+      setAiReplay([]);
+      setAiRun(undefined);
+      return;
+    }
+    setAiConversationId(conversationId);
+    setAiRun(undefined);
+    setAiApproval(undefined);
+    try { setAiReplay(await api.listMessages(conversationId)); }
+    catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+  };
+
+  const deleteConversation = async (conversationId: string) => {
+    try {
+      await api.deleteConversation(conversationId);
+      if (aiConversationId === conversationId) { setAiConversationId(undefined); setAiReplay([]); }
+      await loadConversations(selectedServerId);
+      notify('已删除会话。');
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+  };
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -184,7 +220,8 @@ export default function App() {
 
   // ------------------------------------------------------------------- tools
 
-  const runTool = async (command: ToolCommandMeta, service: string) => {
+  const runTool = async (command: ToolCommandMeta, service: string, batch = false) => {
+    if (batch) { await runToolBatch(command, service); return; }
     const server = selectedServer ?? connectedServers[0];
     if (!server) { setBanner({ kind: 'error', text: '请先选择服务器。' }); return; }
     setBusyServerId(server.id);
@@ -206,6 +243,35 @@ export default function App() {
     finally { setBusyServerId(undefined); }
   };
 
+  const runToolBatch = async (command: ToolCommandMeta, service: string) => {
+    if (connectedServers.length === 0) { setBanner({ kind: 'error', text: '没有已连接的服务器。' }); return; }
+    setBusyServerId(connectedServers[0].id);
+    try {
+      const response = await api.batchExecuteTool({
+        batchId: crypto.randomUUID(),
+        requestedAt: new Date().toISOString(),
+        calls: connectedServers.map((server) => ({
+          id: crypto.randomUUID(),
+          name: command.toolName,
+          version: '1.0.0',
+          input: command.input,
+          target: buildTarget(command, server.id, service),
+          requestedAt: new Date().toISOString(),
+        })),
+      });
+      const approvals = response.items.map((item) => item.approval).filter(Boolean) as ApprovalRequest[];
+      const denied = response.items.filter((item) => item.status === 'denied').length;
+      const ok = response.items.filter((item) => item.status === 'success').length;
+      const summary = `批量完成：成功 ${ok} · 拒绝 ${denied} · 待审批 ${approvals.length}`;
+      notify(summary);
+      if (approvals.length > 0) {
+        setApprovalQueue(approvals.slice(1));
+        setUserApproval(approvals[0]);
+      }
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    finally { setBusyServerId(undefined); }
+  };
+
   const resolveUserApproval = async (decision: 'approve' | 'reject') => {
     if (!userApproval) return;
     const typedConfirmation = userApproval.requiredConfirmation === 'typeTarget' && decision === 'approve'
@@ -217,6 +283,11 @@ export default function App() {
       });
       setUserApproval(undefined);
       if (response.kind === 'result') { setLastToolResult(response.result); notify(response.result.summary); }
+      // Batch flow: promote the next queued approval, if any.
+      setApprovalQueue((queue) => {
+        if (queue.length > 0) setUserApproval(queue[0]);
+        return queue.slice(1);
+      });
     } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
   };
 
@@ -237,8 +308,10 @@ export default function App() {
     setAiBusy(true);
     setAiApproval(undefined);
     try {
-      const run = await api.agentSend({ serverId: selectedServerId, message: aiInput.trim() });
+      const run = await api.agentSend({ serverId: selectedServerId, message: aiInput.trim(), ...(aiConversationId ? { conversationId: aiConversationId } : {}) });
       setAiRun(run);
+      setAiReplay([]);
+      void loadConversations(selectedServerId);
       if (run.status === 'waitingApproval' && run.pendingApproval) notify('AI 请求执行变更操作，需要安全确认。');
       if (run.pendingApproval) setAiApproval(run.pendingApproval);
       setAiInput('');
@@ -369,7 +442,7 @@ export default function App() {
         />
 
         <section className="workspace-main">
-          <QuickActions server={selectedServer ?? connectedServers[0]} busy={busyServerId !== undefined} onRun={(command, service) => void runTool(command, service)} />
+          <QuickActions server={selectedServer ?? connectedServers[0]} connectedCount={connectedServers.length} busy={busyServerId !== undefined} onRun={(command, service, batchMode) => void runTool(command, service, batchMode)} />
           {lastToolResult && <code className="exec-output tool-last">{lastToolResult.summary}</code>}
           <TerminalTabs
             tabs={tabs}
@@ -391,6 +464,12 @@ export default function App() {
           busy={aiBusy}
           input={aiInput}
           aiConfigured={Boolean(aiProvider?.apiKeyCredentialId)}
+          conversations={aiConversations}
+          activeConversationId={aiConversationId}
+          replay={aiReplay}
+          onOpenAudit={() => setShowAudit(true)}
+          onConversationSelect={(id) => void selectConversation(id)}
+          onConversationDelete={(id) => void deleteConversation(id)}
           onTargetChange={setSelectedServerId}
           onInput={setAiInput}
           onSend={() => void sendAiMessage()}
@@ -405,6 +484,7 @@ export default function App() {
         <button className="text-button" onClick={() => void refresh()}>重新检查</button>
       </footer>
 
+      {showAudit && <AuditDrawer profiles={profiles} onClose={() => setShowAudit(false)} />}
       {(showProfileForm || editingProfile) && (
         <ProfileForm
           editing={editingProfile}

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentRequest, AgentRunDto, AiProviderSettings, AiProviderSettingsInput, AppSettings, ApprovalGrant, AuditEvent, AppErrorDto, ConnectionDto, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalReadDto, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult } from '../types/contracts';
+import type { AgentRequest, AgentRunDto, AiConversation, AiMessage, AiProviderSettings, AiProviderSettingsInput, AppSettings, ApprovalGrant, AuditEvent, AuditQuery, AppErrorDto, BatchToolCall, BatchToolResponse, ConnectionDto, ConversationListQuery, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalReadDto, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult } from '../types/contracts';
 
 export class AppError extends Error {
   readonly dto: AppErrorDto;
@@ -58,6 +58,7 @@ export const api = {
   hostKeyResolve: (decision: HostKeyDecision) => call<void>('host_key_resolve', { decision }),
   listToolDefinitions: (serverId?: string) => call<ToolDefinition[]>('tool_definitions_list', { serverId }),
   executeTool: (toolCall: ToolCall) => call<ToolExecutionResponse>('tool_execute', { call: toolCall }),
+  batchExecuteTool: (batch: BatchToolCall) => call<BatchToolResponse>('batch_tool_execute', { batch }),
   resolveApproval: (grant: ApprovalGrant) => call<ToolExecutionResponse>('approval_resolve', { grant }),
   listAuditEvents: (limit = 100) => call<AuditEvent[]>('audit_events_list', { limit }),
   getAiProviderSettings: () => call<AiProviderSettings | null>('ai_provider_settings_get'),
@@ -66,4 +67,10 @@ export const api = {
   agentSend: (request: AgentRequest) => call<AgentRunDto>('agent_send', { request }),
   agentResume: (runId: string, result: ToolResult) => call<AgentRunDto>('agent_resume', { runId, result }),
   agentCancel: (runId: string) => call<boolean>('agent_cancel', { runId }),
+  listConversations: (query: ConversationListQuery = {}) =>
+    call<AiConversation[]>('ai_conversations_list', { query }),
+  listMessages: (conversationId: string, limit = 200, offset = 0) =>
+    call<AiMessage[]>('ai_messages_list', { conversationId, limit, offset }),
+  deleteConversation: (conversationId: string) => call<boolean>('ai_conversation_delete', { conversationId }),
+  queryAuditEvents: (query: AuditQuery) => call<AuditEvent[]>('audit_events_query', { query }),
 };

@@ -1,4 +1,4 @@
-import type { AgentRunDto, ApprovalRequest, ServerProfile } from '../../types/contracts';
+import type { AgentRunDto, AiConversation, AiMessage, ApprovalRequest, ServerProfile } from '../../types/contracts';
 
 interface Props {
   servers: ServerProfile[];
@@ -7,12 +7,18 @@ interface Props {
   approval?: ApprovalRequest;
   busy: boolean;
   input: string;
+  conversations: AiConversation[];
+  activeConversationId?: string;
+  replay: AiMessage[];
   onTargetChange: (serverId: string) => void;
   onInput: (value: string) => void;
   onSend: () => void;
   onResolveApproval: (decision: 'approve' | 'reject') => void;
   onCancel: () => void;
   onOpenSettings: () => void;
+  onOpenAudit: () => void;
+  onConversationSelect: (conversationId: string) => void;
+  onConversationDelete: (conversationId: string) => void;
   aiConfigured: boolean;
 }
 
@@ -38,6 +44,27 @@ export default function AiPanel(props: Props) {
         <span className={`environment ${target?.environment ?? 'unknown'}`}>
           {target ? `上下文：${target.name}` : '上下文：未选择服务器'}
         </span>
+        <button className="tiny-button" onClick={props.onOpenAudit}>审计记录</button>
+      </div>
+      <div className="ai-conversations">
+        <select
+          value={props.activeConversationId ?? ''}
+          onChange={(event) => props.onConversationSelect(event.target.value)}
+        >
+          <option value="">＋ 新会话</option>
+          {props.conversations.map((conversation) => (
+            <option key={conversation.id} value={conversation.id}>
+              {conversation.title}（{conversation.messageCount} 条）
+            </option>
+          ))}
+        </select>
+        {props.activeConversationId && (
+          <button
+            className="tiny-button danger"
+            title="删除当前会话"
+            onClick={() => props.activeConversationId && props.onConversationDelete(props.activeConversationId)}
+          >删除</button>
+        )}
       </div>
       <div className="ai-timeline">
         {props.run?.steps.map((step) => (
@@ -49,7 +76,12 @@ export default function AiPanel(props: Props) {
         ))}
         {props.run?.finalText && <p className="ai-final">{props.run.finalText}</p>}
         {props.run?.error && <p className="ai-run-error">{props.run.error.code}: {props.run.error.message}</p>}
-        {!props.run && <div className="ai-empty">向 AI 描述问题，例如「内存为什么这么高」。只读诊断自动执行，变更操作会先请求确认。</div>}
+        {!props.run && props.replay.length > 0 && props.replay.map((message) => (
+          message.role === 'tool'
+            ? <div className="ai-step" key={message.id}><code className="ai-step-status success">工具</code><strong>{message.toolCallId ?? 'tool'}</strong><span>已回放</span></div>
+            : <p className={`ai-replay ai-replay-${message.role}`} key={message.id}>{message.content}</p>
+        ))}
+        {!props.run && props.replay.length === 0 && <div className="ai-empty">向 AI 描述问题，例如「内存为什么这么高」。只读诊断自动执行，变更操作会先请求确认。</div>}
       </div>
       {props.approval && (
         <section className="approval-card">

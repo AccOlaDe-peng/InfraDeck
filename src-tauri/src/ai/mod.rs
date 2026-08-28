@@ -7,6 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::AppError;
 
+pub mod conversation;
+
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini";
 pub const MAX_TOOL_ITERATIONS_LIMIT: u32 = 20;
@@ -286,10 +288,13 @@ pub struct AgentRunState {
     pub run_id: String,
     pub conversation_id: String,
     pub server_id: String,
+    pub title: String,
     pub messages: Vec<ChatMessage>,
     pub steps: Vec<AgentToolStep>,
     pub pending_tool_call_id: Option<String>,
     pub iterations: u32,
+    /// Messages below this index are already written to ai_messages.
+    pub persisted_seq: u32,
     pub token: CancellationToken,
 }
 

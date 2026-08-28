@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aiProviderSettingsInputSchema, appErrorSchema, serverProfileInputSchema } from './schemas';
+import { aiProviderSettingsInputSchema, appErrorSchema, auditQuerySchema, conversationListQuerySchema, serverProfileInputSchema } from './schemas';
 
 describe('contract schemas', () => {
   it('accepts a server profile input', () => {
@@ -11,6 +11,13 @@ describe('contract schemas', () => {
   it('accepts an ai provider settings input without api key', () => {
     const parsed = aiProviderSettingsInputSchema.parse({ baseUrl: 'https://api.example.com/v1', model: 'gpt-x', maxToolIterations: 8 });
     expect(parsed.model).toBe('gpt-x');
+  });
+  it('validates conversation and audit queries', () => {
+    expect(conversationListQuerySchema.parse({ serverId: crypto.randomUUID(), limit: 30 }).limit).toBe(30);
+    expect(conversationListQuerySchema.safeParse({ limit: 101 }).success).toBe(false);
+    expect(auditQuerySchema.parse({ actor: 'ai', action: 'tool.', limit: 500 }).action).toBe('tool.');
+    expect(auditQuerySchema.safeParse({ actor: 'robot' }).success).toBe(false);
+    expect(auditQuerySchema.safeParse({ limit: 501 }).success).toBe(false);
   });
   it('rejects invalid ai provider settings', () => {
     expect(aiProviderSettingsInputSchema.safeParse({ baseUrl: 'ftp://x', model: 'm' }).success).toBe(false);

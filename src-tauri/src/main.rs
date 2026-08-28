@@ -44,8 +44,10 @@ fn main() {
             commands::credential_exists,
             commands::tool_definitions_list,
             commands::tool_execute,
+            commands::batch_tool_execute,
             commands::approval_resolve,
             commands::audit_events_list,
+            commands::audit_events_query,
             commands::app_settings_get,
             commands::app_settings_save,
             commands::ai::ai_provider_settings_get,
@@ -53,6 +55,9 @@ fn main() {
             commands::ai::agent_send,
             commands::ai::agent_resume,
             commands::ai::agent_cancel,
+            commands::ai::ai_conversations_list,
+            commands::ai::ai_messages_list,
+            commands::ai::ai_conversation_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running InfraDeck");

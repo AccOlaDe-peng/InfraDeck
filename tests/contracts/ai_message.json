@@ -1,0 +1,11 @@
+{
+  "id": "0f0a1b2c-3d4e-4f50-8611-223344556677",
+  "conversationId": "1a1a1b2c-3d4e-4f50-8611-223344556677",
+  "seq": 3,
+  "role": "tool",
+  "content": "{\"tool\":\"result\",\"callId\":\"call_0\",\"status\":\"success\"}",
+  "toolCallId": "call_0",
+  "toolCalls": null,
+  "agentRunId": "2b2b1b2c-3d4e-4f50-8611-223344556677",
+  "createdAt": "2026-08-28T04:00:00+00:00"
+}

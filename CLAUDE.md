@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-InfraDeck 是一个 AI-native Infrastructure Workspace（桌面 SSH 基础设施管理工具），当前 V0.1 已完成 M0–M5（M5「V1 UX」：三栏工作区布局、xterm 终端多 Tab、AI 面板、Quick Actions、设置、命令面板），可作为基础 SSH 客户端日常使用。技术栈：Tauri 2 + Rust 后端、React 18 + Vite + TypeScript 前端、SQLite（rusqlite bundled）、zod 契约校验、vitest/cargo 测试。
+InfraDeck 是一个 AI-native Infrastructure Workspace（桌面 SSH 基础设施管理工具），当前已完成 M0–M5 及 V0.2 的 M6–M7（AI 会话持久化与回放、审计查看器、批量工具执行），可作为基础 SSH 客户端日常使用。技术栈：Tauri 2 + Rust 后端、React 18 + Vite + TypeScript 前端、SQLite（rusqlite bundled）、zod 契约校验、vitest/cargo 测试。
 
 已实现能力：IPC health check、Server Profile 的 SQLite 持久化（凭据只存 reference）、SSH 连接/Exec/PTY、Host Key 校验、Tool Registry + Policy Engine + Approval + Audit（M2）、AI Agent Loop（M3：OpenAI-Compatible Provider、Context 注入、tool-calling 循环、迭代/输出预算、输出 ANSI 清洗与 secret redaction）。Agent 遇到变更工具会暂停等待人工审批，审批通过后由前端 `agent_resume` 回填 ToolResult 继续循环。
 
-`doc/InfraDeck_开发实施规范_v0.1.md` 是唯一实施级规范，字段/命令/状态/错误码的变更必须先改文档并加 migration 或 contract version，禁止只改代码。文档优先级：实施规范 > 核心接口定义 > Tool 协议 > 架构设计 > PRD/任务清单。
+`doc/InfraDeck_开发实施规范_v0.1.md` 是 V0.1 实施规范；V0.2/V1.0 演进以 `doc/InfraDeck_V0.2_产品演进设计_v0.1.md`（设计层）+ `doc/InfraDeck_V0.2_开发实施规范_v0.2.md`（实施级，唯一事实源）为准。字段/命令/状态/错误码的变更必须先改文档并加 migration 或 contract version，禁止只改代码。文档优先级：实施规范 > 核心接口定义 > Tool 协议 > 架构设计 > PRD/任务清单。
 
 ## 常用命令
 
@@ -49,7 +49,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 - `ai/mod.rs`：`LlmProvider` trait（M3 只实现 OpenAI-Compatible，走 reqwest + rustls）、`AiProviderSettings` DTO 与校验、`AgentRunState`、工具输出清洗（`strip_ansi`/`sanitize_tool_output`）。AI Provider 设置存 SQLite `ai_provider_settings` 表（migration 0004），API Key 只存系统凭据存储的 credential id。
 - `ssh/mod.rs`（M5 扩展）：连接断开时 `close_terminal_sessions_of` 会关闭并移除该连接名下的全部终端会话，PTY 不会比连接活得更久。`SshProvider` trait 除 connect/exec/pty 外还有 `pty_write`/`pty_resize`/`pty_take_output`/`pty_close`；`SshManager` 维护 `terminal_sessions`（session_id → pty id）映射并提供 `terminal_*` 方法；`MockSshProvider` 的 PTY 会回显写入内容。
 - `ssh/real.rs`（M5）：`open_pty` 用 russh `channel.split()` 读写分离——reader 任务把输出汇入 128KiB 尾部环形 buffer（`PtyBuffer`），写半通过 `Arc<ChannelWriteHalf>` 提供 data/window_change/close。
-- 前端组件（`src/app/components/`）：`ServerSidebar`（搜索/环境分组/状态/连接操作）、`TerminalTabs` + `TerminalView`（xterm.js，60ms 轮询 `terminal_read`，base64 传输，ResizeObserver 同步 resize）、`AiPanel`（上下文徽标/工具时间线/审批卡）、`QuickActions`、`SettingsDialog`（AI Provider + 权限模式 + 隐私）、`CommandPalette`（⌘K，与 `lib/commandMeta.ts` 的工具元数据共用）、`ProfileForm`。`App.tsx` 是唯一的状态编排层。
+- `ai/conversation.rs` + migration 0005：M6 会话持久化——`AiConversationDto`/`AiMessageDto`，`persist_run_messages` 以 `AgentRunState.persisted_seq` 为游标增量落盘（受 `conversationPersistence` 开关约束，关=只写元数据）；`audit_events_query`（`AuditQuery` 全条件可选 AND 检索）。M7 批量：`run_batch_tool_execute` 逐调用走同一 Policy 路径、每 mutation 独立 ApprovalRequest、汇总写 `batch.execute` 审计。
+- 前端组件（`src/app/components/`）：`ServerSidebar`（搜索/环境分组/状态/连接操作）、`TerminalTabs` + `TerminalView`（xterm.js，60ms 轮询 `terminal_read`，base64 传输，ResizeObserver 同步 resize）、`AiPanel`（上下文徽标/工具时间线/审批卡）、`QuickActions`、`SettingsDialog`（AI Provider + 权限模式 + 隐私）、`CommandPalette`（⌘K，与 `lib/commandMeta.ts` 的工具元数据共用）、`ProfileForm`、`AuditDrawer`（审计检索/导出）。`App.tsx` 是唯一的状态编排层。
 - `ssh/mod.rs`：`SshProvider` trait 抽象；`SshManager` 维护连接注册表与状态机（`can_transition`/`transition`，非法跳转会报 `InvalidTransition`）、并发 channel 上限 8；`MockSshProvider` 用于测试。定义 Exec/PTY 的 DTO 与请求参数。
 - `ssh/hostkey.rs`：纯逻辑的 host key 校验——`evaluate` 得出 `Unknown/Changed/Matched` 状态，`decision_allowed` 判定 TrustOnce/TrustAndSave/Reject 是否合法（Changed 不允许 TrustAndSave）。
 - `ssh/real.rs`：`RusshProvider`（russh crate）真实连接实现；`HostKeyTrustStore` 内存缓存已信任指纹；按平台实现 SSH agent 认证（macOS `SSH_AUTH_SOCK`，Windows named pipe）。
