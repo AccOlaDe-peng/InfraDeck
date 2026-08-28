@@ -1,3 +1,4 @@
+import { ENVIRONMENT_LABELS } from '../../lib/commandMeta';
 import type { AgentRunDto, AiConversation, AiMessage, ApprovalRequest, ServerProfile } from '../../types/contracts';
 
 interface Props {
@@ -5,6 +6,8 @@ interface Props {
   targetServerId?: string;
   run?: AgentRunDto;
   approval?: ApprovalRequest;
+  /** Approval raised by manual tool runs (QuickActions/palette) — inlined here, dbx-style. */
+  userApproval?: ApprovalRequest;
   busy: boolean;
   input: string;
   conversations: AiConversation[];
@@ -15,6 +18,7 @@ interface Props {
   onInput: (value: string) => void;
   onSend: () => void;
   onResolveApproval: (decision: 'approve' | 'reject') => void;
+  onResolveUserApproval: (decision: 'approve' | 'reject') => void;
   onCancel: () => void;
   onOpenSettings: () => void;
   onOpenAudit: () => void;
@@ -102,6 +106,34 @@ export default function AiPanel(props: Props) {
           </div>
         </section>
       )}
+      {props.userApproval && (
+        <section className="approval-card">
+          <p className="eyebrow">TOOL APPROVAL · {props.userApproval.risk.level.toUpperCase()}</p>
+          <strong>{props.userApproval.summary}</strong>
+          <span>{props.userApproval.targetLabel}</span>
+          <small>{props.userApproval.impact.join('；')}</small>
+          <div className="approval-actions">
+            <button className="tiny-button connect" disabled={props.busy} onClick={() => props.onResolveUserApproval('approve')}>批准执行</button>
+            <button className="tiny-button danger" disabled={props.busy} onClick={() => props.onResolveUserApproval('reject')}>拒绝</button>
+          </div>
+        </section>
+      )}
+      {/* 上下文选择器常驻输入框上方（dbx 式）：用户始终清楚 AI 看着哪台服务器 */}
+      <div className="ai-context-select">
+        <span className="ai-context-label">上下文</span>
+        <select
+          value={props.targetServerId ?? ''}
+          disabled={props.busy}
+          onChange={(event) => props.onTargetChange(event.target.value)}
+        >
+          <option value="" disabled>选择服务器…</option>
+          {props.servers.map((server) => (
+            <option key={server.id} value={server.id}>
+              {server.name} · {ENVIRONMENT_LABELS[server.environment]}
+            </option>
+          ))}
+        </select>
+      </div>
       <div className="ai-input-row">
         <input
           value={props.input}

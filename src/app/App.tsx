@@ -10,6 +10,7 @@ import type {
 import ServerSidebar from './components/ServerSidebar';
 import TerminalTabs, { type TerminalTab } from './components/TerminalTabs';
 import AiPanel from './components/AiPanel';
+import TopBar from './components/TopBar';
 import QuickActions from './components/QuickActions';
 import SettingsDialog from './components/SettingsDialog';
 import CommandPalette, { type PaletteCommand } from './components/CommandPalette';
@@ -414,20 +415,17 @@ export default function App() {
 
   return (
     <main className="workspace-shell">
-      <header className="topbar">
-        <div className="topbar-left">
-          <p className="eyebrow">AI-NATIVE INFRASTRUCTURE WORKSPACE</p>
-          <h1>InfraDeck</h1>
-        </div>
-        <div className="topbar-actions">
-          <button className="small-button" onClick={() => setPaletteOpen(true)}>⌘K 命令面板</button>
-          <button className="small-button" onClick={() => setShowSettings(true)}>设置</button>
-          <div className={`health-pill ${health ? 'ready' : 'offline'}`}>
-            <span className="status-dot" />
-            {health ? '后端已就绪' : '连接后端中'}
-          </div>
-        </div>
-      </header>
+      <TopBar
+        healthReady={Boolean(health)}
+        mainView={mainView}
+        connected={Boolean((selectedServer ?? connectedServers[0]) && connections[(selectedServer ?? connectedServers[0]).id]?.state === 'connected')}
+        onView={setMainView}
+        onOpenTerminal={() => { const target = selectedServer ?? connectedServers[0]; if (target) { setMainView('terminal'); void openTerminalFor(target); } }}
+        onAddServer={() => { setEditingProfile(undefined); setShowProfileForm(true); }}
+        onPalette={() => setPaletteOpen(true)}
+        onAudit={() => setShowAudit(true)}
+        onSettings={() => setShowSettings(true)}
+      />
 
       {banner && <div className={banner.kind === 'error' ? 'banner error' : 'banner success'} onClick={() => setBanner(undefined)}>{banner.text}</div>}
 
@@ -446,20 +444,7 @@ export default function App() {
           </div>
         </section>
       )}
-      {userApproval && (
-        <section className="hostkey-card">
-          <div>
-            <p className="eyebrow">APPROVAL REQUIRED · {userApproval.risk.level.toUpperCase()}</p>
-            <h3>{userApproval.summary}</h3>
-            <p>{userApproval.targetLabel}</p>
-            <small>{userApproval.impact.join('；')}</small>
-          </div>
-          <div className="hostkey-actions">
-            <button className="small-button connect" onClick={() => void resolveUserApproval('approve')}>批准执行</button>
-            <button className="small-button danger" onClick={() => void resolveUserApproval('reject')}>拒绝</button>
-          </div>
-        </section>
-      )}
+      {/* 工具审批内联在 AI 面板（dbx 式：不打断、可忽略、留痕）；收起时窄栏圆点提醒 */}
 
       <div className={`workspace-grid ${aiCollapsed ? 'ai-collapsed' : ''}`}>
         <ServerSidebar
@@ -531,7 +516,7 @@ export default function App() {
               title="展开 AI 助手"
               onClick={() => toggleAiPanel(false)}
             >AI ›</button>
-            {aiApproval && <span className="ai-rail-dot" title="有待审批的 AI 操作" />}
+            {(aiApproval || userApproval) && <span className="ai-rail-dot" title="有待审批的操作" />}
           </aside>
         ) : (
         <AiPanel
@@ -539,6 +524,7 @@ export default function App() {
           targetServerId={selectedServerId}
           run={aiRun}
           approval={aiApproval}
+          userApproval={userApproval}
           busy={aiBusy}
           input={aiInput}
           aiConfigured={Boolean(aiProvider?.apiKeyCredentialId)}
@@ -554,6 +540,7 @@ export default function App() {
           onInput={setAiInput}
           onSend={() => void sendAiMessage()}
           onResolveApproval={(decision) => void resolveAiApproval(decision)}
+          onResolveUserApproval={(decision) => void resolveUserApproval(decision)}
           onCancel={() => void cancelAiRun()}
           onOpenSettings={() => setShowSettings(true)}
         />

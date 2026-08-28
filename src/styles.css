@@ -204,3 +204,26 @@ footer { margin-top: 22px; color: var(--text-dim); font-size: 11px; }.text-butto
 .ai-rail-toggle { writing-mode: vertical-rl; letter-spacing: .2em; border: 1px solid var(--border-strong); border-radius: 6px; padding: 10px 6px; color: var(--text-mid); background: var(--bg-raise); font-size: 11px; font-weight: 700; }
 .ai-rail-toggle:hover { border-color: var(--accent); color: var(--text); }
 .ai-rail-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn-strong); animation: ai-blink 1s steps(1) infinite; }
+
+/* dbx-style top action bar */
+.topbar { justify-content: flex-start; gap: 18px; padding-bottom: 10px; }
+.topbar-brand { display: flex; align-items: center; gap: 7px; margin-right: 6px; }
+.topbar-logo { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--text-on-primary); background: var(--primary); font-size: 13px; }
+.topbar-name { color: var(--text); font-size: 14px; font-weight: 700; letter-spacing: -.01em; }
+.topbar-actions { display: flex; align-items: center; gap: 2px; flex: 1; }
+.topbar-btn { display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 6px; padding: 6px 9px; color: var(--text-mid); background: transparent; font-size: 12px; white-space: nowrap; }
+.topbar-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.topbar-btn.active { color: var(--text); background: var(--bg-hover); }
+.topbar-btn:disabled { opacity: .45; cursor: not-allowed; }
+.topbar-icon { font-size: 12px; color: var(--text-dim); }
+.topbar-btn.active .topbar-icon, .topbar-btn:hover:not(:disabled) .topbar-icon { color: var(--accent); }
+.topbar-more { position: relative; }
+.topbar-menu { position: absolute; top: calc(100% + 4px); left: 0; display: flex; flex-direction: column; min-width: 150px; border: 1px solid var(--border-strong); border-radius: 8px; padding: 4px; background: var(--bg-panel); box-shadow: 0 12px 32px rgba(0,0,0,.35); z-index: 30; }
+.topbar-menu button { border: 0; border-radius: 5px; padding: 7px 10px; color: var(--text-mid); background: transparent; font-size: 12px; text-align: left; }
+.topbar-menu button:hover { background: var(--bg-hover); color: var(--text); }
+.health-pill { margin-left: auto; padding: 4px 11px; font-size: 11px; }
+
+/* AI context selector above the input row */
+.ai-context-select { display: flex; align-items: center; gap: 7px; }
+.ai-context-label { color: var(--text-dim); font-size: 10px; font-weight: 700; }
+.ai-context-select select { flex: 1; margin: 0; padding: 6px 8px; font-size: 11px; }
