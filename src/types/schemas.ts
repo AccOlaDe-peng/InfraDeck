@@ -26,3 +26,13 @@ export const appErrorSchema = z.object({
   category: z.enum(['ssh', 'tool', 'policy', 'ai', 'storage', 'validation', 'credential', 'unknown']),
   details: z.record(z.unknown()).optional(),
 });
+
+export const aiProviderSettingsInputSchema = z.object({
+  providerKind: z.literal('openaiCompatible').optional(),
+  baseUrl: z.string().trim().regex(/^https?:\/\//, 'baseUrl must start with http:// or https://'),
+  model: z.string().trim().min(1),
+  apiKey: z.string().trim().min(1).optional(),
+  apiKeyCredentialId: z.string().uuid().optional(),
+  maxToolIterations: z.number().int().min(1).max(20).optional(),
+  maxToolOutputChars: z.number().int().min(500).max(50000).optional(),
+});

@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, AppError } from '../lib/tauri';
-import type { ApprovalRequest, AuthRef, ConnectionDto, Environment, HealthCheckDto, ExecResult, ResourceTarget, ServerProfile, ServerProfileInput, ToolResult } from '../types/contracts';
+import type { AgentRunDto, AiProviderSettings, ApprovalRequest, AuthRef, ConnectionDto, Environment, HealthCheckDto, ExecResult, ResourceTarget, ServerProfile, ServerProfileInput, ToolResult } from '../types/contracts';
 
 type HostKeyPrompt = { serverId: string; host: string; port: number; algorithm: string; fingerprintSha256: string };
 
@@ -42,16 +42,33 @@ export default function App() {
   const [editingProfileId, setEditingProfileId] = useState<string>();
   const [pendingApproval, setPendingApproval] = useState<ApprovalRequest>();
   const [toolResults, setToolResults] = useState<Record<string, ToolResult>>({});
+  const [aiSettings, setAiSettings] = useState<AiProviderSettings>();
+  const [aiBaseUrl, setAiBaseUrl] = useState('https://api.openai.com/v1');
+  const [aiModel, setAiModel] = useState('gpt-4o-mini');
+  const [aiApiKey, setAiApiKey] = useState('');
+  const [aiMaxIterations, setAiMaxIterations] = useState(8);
+  const [aiTarget, setAiTarget] = useState('');
+  const [aiInput, setAiInput] = useState('');
+  const [aiRun, setAiRun] = useState<AgentRunDto>();
+  const [agentApproval, setAgentApproval] = useState<ApprovalRequest>();
+  const [aiBusy, setAiBusy] = useState(false);
 
   const refresh = async () => {
     setError(undefined);
     try {
-      const [healthResult, savedProfiles] = await Promise.all([
+      const [healthResult, savedProfiles, providerSettings] = await Promise.all([
         api.healthCheck(),
         api.listServerProfiles(),
+        api.getAiProviderSettings(),
       ]);
       setHealth(healthResult);
       setProfiles(savedProfiles);
+      if (providerSettings) {
+        setAiSettings(providerSettings);
+        setAiBaseUrl(providerSettings.baseUrl);
+        setAiModel(providerSettings.model);
+        setAiMaxIterations(providerSettings.maxToolIterations);
+      }
     } catch (cause) { setError(errorMessage(cause)); }
   };
 
@@ -235,6 +252,60 @@ export default function App() {
     finally { setConnectionBusy(undefined); }
   };
 
+  const saveAiSettings = async (event: FormEvent) => {
+    event.preventDefault();
+    setAiBusy(true); setError(undefined);
+    try {
+      const saved = await api.saveAiProviderSettings({
+        baseUrl: aiBaseUrl,
+        model: aiModel,
+        apiKey: aiApiKey.trim() || undefined,
+        maxToolIterations: aiMaxIterations,
+      });
+      setAiSettings(saved);
+      setAiApiKey('');
+      setNotice('AI Provider 设置已保存，API Key 只存入系统凭据存储。');
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setAiBusy(false); }
+  };
+
+  const sendAgentMessage = async () => {
+    if (!aiTarget || !aiInput.trim()) return;
+    setAiBusy(true); setError(undefined);
+    setAgentApproval(undefined);
+    try {
+      const run = await api.agentSend({ serverId: aiTarget, message: aiInput.trim() });
+      setAiRun(run);
+      if (run.status === 'waitingApproval' && run.pendingApproval) { setAgentApproval(run.pendingApproval); setNotice('AI 请求执行变更操作，需要安全确认。'); }
+      setAiInput('');
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setAiBusy(false); }
+  };
+
+  const resolveAgentApproval = async (decision: 'approve' | 'reject') => {
+    if (!agentApproval || !aiRun) return;
+    const typedConfirmation = agentApproval.requiredConfirmation === 'typeTarget' && decision === 'approve' ? window.prompt(`请输入目标以确认：${agentApproval.targetLabel}`) ?? undefined : undefined;
+    setAiBusy(true);
+    try {
+      const response = await api.resolveApproval({ approvalId: agentApproval.approvalId, requestHash: agentApproval.requestHash, decision, typedConfirmation });
+      setAgentApproval(undefined);
+      if (response.kind === 'result') {
+        const run = await api.agentResume(aiRun.runId, response.result);
+        setAiRun(run);
+        if (run.status === 'waitingApproval' && run.pendingApproval) { setAgentApproval(run.pendingApproval); setNotice('AI 请求执行下一个变更操作，需要安全确认。'); }
+      }
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { setAiBusy(false); }
+  };
+
+  const cancelAgentRun = async () => {
+    if (!aiRun) return;
+    try { await api.agentCancel(aiRun.runId); setNotice('已请求取消当前 AI 运行。'); } catch (cause) { setError(errorMessage(cause)); }
+  };
+
+  const connectedServers = profiles.filter((item) => connections[item.id]?.state === 'connected');
+  const aiConfigured = Boolean(aiSettings?.apiKeyCredentialId);
+
   return (
     <main className="shell">
       <header className="topbar">
@@ -294,7 +365,44 @@ export default function App() {
         </section>
       </section>
 
-      <footer><span>InfraDeck v0.1 · M0 Engineering Foundation</span><button className="text-button" onClick={() => void refresh()}>重新检查</button></footer>
+      <section className="content-grid" id="ai-panel">
+        <form className="panel form-panel" onSubmit={saveAiSettings}>
+          <div className="panel-heading">
+            <div><p className="eyebrow">AI PROVIDER · OPENAI-COMPATIBLE</p><h3>AI 设置</h3></div>
+            <span className="step-badge">M3</span>
+          </div>
+          <label>Base URL<input required value={aiBaseUrl} onChange={(e) => setAiBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" /></label>
+          <div className="form-row">
+            <label>模型<input required value={aiModel} onChange={(e) => setAiModel(e.target.value)} placeholder="gpt-4o-mini" /></label>
+            <label>最大工具迭代<input type="number" min={1} max={20} value={aiMaxIterations} onChange={(e) => setAiMaxIterations(Number(e.target.value))} /></label>
+          </div>
+          <label>API Key<input type="password" value={aiApiKey} onChange={(e) => setAiApiKey(e.target.value)} placeholder={aiConfigured ? '已保存（输入新值可覆盖）' : '只写入系统凭据存储'} /></label>
+          <p className="form-note">API Key 只保存 credential reference；AI 只能调用注册工具，变更操作必须经过人工审批并留审计记录。</p>
+          <div className="form-actions"><button className="primary-button" type="submit" disabled={aiBusy}>{aiBusy ? '保存中…' : '保存 AI 设置'}</button></div>
+        </form>
+
+        <section className="panel profiles-panel">
+          <div className="panel-heading"><div><p className="eyebrow">AI AGENT · DIAGNOSE → PROPOSE → EXECUTE → VERIFY</p><h3>AI 助手</h3></div><span className="count">{aiRun ? `#${aiRun.iterations}` : '∅'}</span></div>
+          {connectedServers.length === 0 ? <div className="empty-state"><span>◎</span><p>没有已连接的服务器</p><small>AI 助手作用于已连接的服务器，请先在右侧连接。</small></div> : <>
+            <div className="form-row">
+              <label>目标服务器<select value={aiTarget} onChange={(e) => setAiTarget(e.target.value)}><option value="">选择服务器…</option>{connectedServers.map((item) => <option key={item.id} value={item.id}>{item.name}（{item.environment}）</option>)}</select></label>
+              {aiRun && aiRun.status === 'waitingApproval' && <button className="small-button danger" type="button" onClick={() => void cancelAgentRun()}>取消运行</button>}
+            </div>
+            {aiRun && <div className="ai-run">
+              {aiRun.steps.map((step) => <div className="ai-step" key={step.toolCallId}><code className={`ai-step-status ${step.status}`}>{step.status}</code><strong>{step.name}</strong><span>{step.summary}</span></div>)}
+              {aiRun.finalText && <p className="ai-final">{aiRun.finalText}</p>}
+              {aiRun.error && <p className="banner error">{aiRun.error.code}: {aiRun.error.message}</p>}
+            </div>}
+            {agentApproval && <section className="hostkey-card"><div><p className="eyebrow">AI PROPOSAL · {agentApproval.risk.level.toUpperCase()}</p><h3>{agentApproval.summary}</h3><p>{agentApproval.targetLabel}</p><small>{agentApproval.impact.join('；')}</small></div><div className="hostkey-actions"><button className="small-button connect" onClick={() => void resolveAgentApproval('approve')}>批准执行</button><button className="small-button danger" onClick={() => void resolveAgentApproval('reject')}>拒绝</button></div></section>}
+            <div className="form-row">
+              <input value={aiInput} onChange={(e) => setAiInput(e.target.value)} placeholder="例如：帮我看看内存为什么这么高" disabled={aiBusy || !aiTarget} onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); void sendAgentMessage(); } }} />
+              <button className="primary-button" type="button" disabled={aiBusy || !aiTarget || !aiInput.trim()} onClick={() => void sendAgentMessage()}>{aiBusy ? 'AI 运行中…' : '发送'}</button>
+            </div>
+          </>}
+        </section>
+      </section>
+
+      <footer><span>InfraDeck v0.1 · M3 AI Loop</span><button className="text-button" onClick={() => void refresh()}>重新检查</button></footer>
     </main>
   );
 }

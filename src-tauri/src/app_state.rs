@@ -1,4 +1,5 @@
 use crate::{
+    ai::AgentRunState,
     config::{AppSettings, PermissionMode, SecretProvider, SecretReference, WorkspaceSettings},
     credentials::{CredentialProvider, PlatformCredentialProvider},
     error::AppError,
@@ -20,6 +21,7 @@ pub struct AppState {
     pub ssh: SshManager<Box<dyn SshProvider>>,
     pub host_keys: Arc<HostKeyTrustStore>,
     pub pending_tool_calls: Mutex<HashMap<String, ToolCall>>,
+    pub ai_runs: Mutex<HashMap<String, AgentRunState>>,
 }
 
 impl AppState {
@@ -46,6 +48,7 @@ impl AppState {
             ssh: SshManager::new(provider),
             host_keys,
             pending_tool_calls: Mutex::new(HashMap::new()),
+            ai_runs: Mutex::new(HashMap::new()),
         })
     }
 }

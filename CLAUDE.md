@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-InfraDeck 是一个 AI-native Infrastructure Workspace（桌面 SSH 基础设施管理工具），当前处于 V0.1 的 M0「工程底座」阶段。技术栈：Tauri 2 + Rust 后端、React 18 + Vite + TypeScript 前端、SQLite（rusqlite bundled）、zod 契约校验、vitest/cargo 测试。
+InfraDeck 是一个 AI-native Infrastructure Workspace（桌面 SSH 基础设施管理工具），当前处于 V0.1 的 M3「AI Loop」阶段。技术栈：Tauri 2 + Rust 后端、React 18 + Vite + TypeScript 前端、SQLite（rusqlite bundled）、zod 契约校验、vitest/cargo 测试。
 
-已实现能力：IPC health check、Server Profile 的 SQLite 持久化（凭据只存 reference）、SSH 连接/Exec/PTY、Host Key 校验。未实现的规划模块（tools/policy/ai/audit/context）见 `doc/` 目录，属于后续里程碑。
+已实现能力：IPC health check、Server Profile 的 SQLite 持久化（凭据只存 reference）、SSH 连接/Exec/PTY、Host Key 校验、Tool Registry + Policy Engine + Approval + Audit（M2）、AI Agent Loop（M3：OpenAI-Compatible Provider、Context 注入、tool-calling 循环、迭代/输出预算、输出 ANSI 清洗与 secret redaction）。Agent 遇到变更工具会暂停等待人工审批，审批通过后由前端 `agent_resume` 回填 ToolResult 继续循环。
 
 `doc/InfraDeck_开发实施规范_v0.1.md` 是唯一实施级规范，字段/命令/状态/错误码的变更必须先改文档并加 migration 或 contract version，禁止只改代码。文档优先级：实施规范 > 核心接口定义 > Tool 协议 > 架构设计 > PRD/任务清单。
 
@@ -39,11 +39,13 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
 - `main.rs`：注册全部 Tauri 命令；tracing 初始化，日志级别由 `RUST_LOG` 环境变量控制，默认 `infradeck=info`。
 - `app_state.rs`：`AppState` 聚合共享状态——`db: Mutex<Database>`、`credentials: Arc<dyn CredentialProvider>`、`ssh: SshManager<Box<dyn SshProvider>>`、`host_keys: Arc<HostKeyTrustStore>`，通过 `tauri::Builder::manage` 注入。
-- `commands/mod.rs`：所有 Tauri 命令的实现。命令有统一模式：锁定 `db` → 调用 repository/service → 返回 DTO 或 `AppError`。带 `#[instrument(skip(...))]` 追踪。
+- `commands/mod.rs`：所有 Tauri 命令的实现。命令有统一模式：锁定 `db` → 调用 repository/service → 返回 DTO 或 `AppError`。带 `#[instrument(skip(...))]` 追踪。`execute_tool` 是 Tool → Policy → Executor 的共享路径，UI 命令以 `actor="user"` 调用、Agent Loop 以 `actor="ai"` 调用。
+- `commands/ai.rs`：AI Provider 设置命令与 Agent Loop 命令（`agent_send`/`agent_resume`/`agent_cancel`）。循环注入服务器上下文 system prompt + 全部注册工具 schema，带最大迭代次数与工具输出字符预算；运行中状态保存在 `AppState.ai_runs`。
 - `models.rs`：`ServerProfile` / `ServerProfileInput` / `AuthRef`（tagged enum：password/privateKey/agent）/ `Environment` / `HealthCheckDto`，是 IPC 的 wire 契约（camelCase 序列化）。
 - `error.rs`：`AppError` 统一错误模型，序列化为 `AppErrorDto { code, message, retryable, category, details }`。前端按 `code`/`category` 分支处理（如 `SSH_HOST_KEY_REQUIRED`、`CREDENTIAL_NOT_FOUND`）。
 - `storage/mod.rs`：`Database`。迁移用 `include_str!("../../migrations/*.sql")` 内嵌并按版本顺序执行。Repository 方法直接写 SQL。
 - `credentials/mod.rs`：`CredentialProvider` trait + `PlatformCredentialProvider`（`keyring` crate，系统 Keychain/Secret Service）。`SecretValue` 不可序列化/克隆/Display，Debug 显示 `[REDACTED]`，Drop 时 zeroize。credential id 必须是 UUID v4。
+- `ai/mod.rs`：`LlmProvider` trait（M3 只实现 OpenAI-Compatible，走 reqwest + rustls）、`AiProviderSettings` DTO 与校验、`AgentRunState`、工具输出清洗（`strip_ansi`/`sanitize_tool_output`）。AI Provider 设置存 SQLite `ai_provider_settings` 表（migration 0004），API Key 只存系统凭据存储的 credential id。
 - `ssh/mod.rs`：`SshProvider` trait 抽象；`SshManager` 维护连接注册表与状态机（`can_transition`/`transition`，非法跳转会报 `InvalidTransition`）、并发 channel 上限 8；`MockSshProvider` 用于测试。定义 Exec/PTY 的 DTO 与请求参数。
 - `ssh/hostkey.rs`：纯逻辑的 host key 校验——`evaluate` 得出 `Unknown/Changed/Matched` 状态，`decision_allowed` 判定 TrustOnce/TrustAndSave/Reject 是否合法（Changed 不允许 TrustAndSave）。
 - `ssh/real.rs`：`RusshProvider`（russh crate）真实连接实现；`HostKeyTrustStore` 内存缓存已信任指纹；按平台实现 SSH agent 认证（macOS `SSH_AUTH_SOCK`，Windows named pipe）。

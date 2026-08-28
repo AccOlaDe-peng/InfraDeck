@@ -22,3 +22,14 @@ label { display: block; margin-bottom: 17px; color: #9db0c8; font-size: 12px; fo
 .profile-actions { display: flex; gap: 6px; }.small-button { border: 1px solid #385675; border-radius: 6px; padding: 6px 8px; color: #b9cce4; background: #142338; font-size: 11px; white-space: nowrap; }.small-button:hover { border-color: #6a98c8; }.small-button:disabled { opacity: .55; cursor: progress; }.small-button.connect { color: #9be3cc; border-color: #2c7467; }.small-button.danger { color: #ffb5ad; border-color: #74404b; }.connection-state { color: #81d6c0 !important; font-size: 10px !important; }.exec-output { max-width: 240px; overflow: hidden; color: #9be3cc; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .hostkey-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 20px; border: 1px solid #8a6337; border-radius: 10px; padding: 16px 18px; color: #f1d2a5; background: #302719; }.hostkey-card h3 { margin: 4px 0 8px; color: #f5e3c7; font-size: 15px; }.hostkey-card p:not(.eyebrow) { margin: 0 0 8px; color: #c9ad7f; font-size: 12px; }.hostkey-card code { color: #ffe2a9; font-size: 11px; word-break: break-all; }.hostkey-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 footer { margin-top: 22px; color: #667b98; font-size: 11px; }.text-button { border: 0; padding: 4px; color: #88a9d4; background: transparent; }@media (max-width: 760px) { .shell { width: min(100% - 28px, 600px); padding-top: 22px; }.hero { display: block; padding: 45px 0 30px; }.health-card { margin-top: 24px; }.content-grid { grid-template-columns: 1fr; }.form-row { display: block; }.topbar { align-items: start; }.health-pill { margin-top: 2px; white-space: nowrap; } }
+
+/* M3 AI Loop */
+.ai-run { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.ai-step { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 8px 10px; border: 1px solid rgba(125, 125, 125, 0.25); border-radius: 8px; }
+.ai-step strong { font-family: var(--font-mono, monospace); }
+.ai-step span { color: rgba(128, 128, 128, 0.9); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-step-status { font-size: 11px; padding: 2px 8px; border-radius: 999px; text-transform: uppercase; }
+.ai-step-status.success { background: rgba(48, 164, 108, 0.18); color: #2f9e63; }
+.ai-step-status.failed, .ai-step-status.denied, .ai-step-status.cancelled { background: rgba(220, 70, 70, 0.15); color: #c4453f; }
+.ai-step-status.waitingApproval, .ai-step-status.partial { background: rgba(230, 170, 50, 0.18); color: #b98a1f; }
+.ai-final { white-space: pre-wrap; font-size: 14px; line-height: 1.6; padding: 10px 12px; border-radius: 8px; background: rgba(110, 130, 255, 0.08); }

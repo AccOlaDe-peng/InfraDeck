@@ -1,3 +1,4 @@
+mod ai;
 mod app_state;
 mod commands;
 mod config;
@@ -39,6 +40,11 @@ fn main() {
             commands::tool_execute,
             commands::approval_resolve,
             commands::audit_events_list,
+            commands::ai::ai_provider_settings_get,
+            commands::ai::ai_provider_settings_save,
+            commands::ai::agent_send,
+            commands::ai::agent_resume,
+            commands::ai::agent_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running InfraDeck");

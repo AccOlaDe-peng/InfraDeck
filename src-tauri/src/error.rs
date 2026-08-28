@@ -18,6 +18,8 @@ pub enum AppError {
     CredentialNotFound,
     #[error("ssh error: {0}")]
     Ssh(String),
+    #[error("ai error: {0}")]
+    Ai(String),
     #[error("SSH host key verification required")]
     SshHostKeyRequired {
         host: String,
@@ -75,6 +77,7 @@ impl AppError {
             Self::Credential(_) => ("CREDENTIAL_PROVIDER_ERROR", "credential", false),
             Self::CredentialNotFound => ("CREDENTIAL_NOT_FOUND", "credential", false),
             Self::Ssh(_) => ("SSH_ERROR", "ssh", true),
+            Self::Ai(_) => ("AI_PROVIDER_ERROR", "ai", true),
             Self::SshHostKeyRequired { .. } => ("SSH_HOST_KEY_REQUIRED", "ssh", false),
         };
         let details = match self {

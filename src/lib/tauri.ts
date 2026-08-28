@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ApprovalGrant, AuditEvent, AppErrorDto, ConnectionDto, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse } from '../types/contracts';
+import type { AgentRequest, AgentRunDto, AiProviderSettings, AiProviderSettingsInput, ApprovalGrant, AuditEvent, AppErrorDto, ConnectionDto, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult } from '../types/contracts';
 
 export class AppError extends Error {
   readonly dto: AppErrorDto;
@@ -53,4 +53,10 @@ export const api = {
   executeTool: (toolCall: ToolCall) => call<ToolExecutionResponse>('tool_execute', { call: toolCall }),
   resolveApproval: (grant: ApprovalGrant) => call<ToolExecutionResponse>('approval_resolve', { grant }),
   listAuditEvents: (limit = 100) => call<AuditEvent[]>('audit_events_list', { limit }),
+  getAiProviderSettings: () => call<AiProviderSettings | null>('ai_provider_settings_get'),
+  saveAiProviderSettings: (input: AiProviderSettingsInput) =>
+    call<AiProviderSettings>('ai_provider_settings_save', { input }),
+  agentSend: (request: AgentRequest) => call<AgentRunDto>('agent_send', { request }),
+  agentResume: (runId: string, result: ToolResult) => call<AgentRunDto>('agent_resume', { runId, result }),
+  agentCancel: (runId: string) => call<boolean>('agent_cancel', { runId }),
 };

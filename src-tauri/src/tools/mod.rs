@@ -703,7 +703,7 @@ fn parse_service(s: &str, call: &ToolCall) -> Result<Value, String> {
         serde_json::json!({"service":call.input["service"],"loadState":m.get("LoadState").copied().unwrap_or("unknown"),"activeState":m.get("ActiveState").copied().unwrap_or("unknown"),"subState":m.get("SubState").copied().unwrap_or("unknown"),"mainPid":m.get("MainPID").and_then(|v|v.parse::<u64>().ok()),"unitFileState":m.get("UnitFileState"),"description":m.get("Description")}),
     )
 }
-fn redact(value: &str) -> String {
+pub(crate) fn redact(value: &str) -> String {
     let lowered = value.to_ascii_lowercase();
     if ["password=", "token=", "secret=", "authorization:"]
         .iter()

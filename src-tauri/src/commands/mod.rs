@@ -1,3 +1,5 @@
+pub mod ai;
+
 use chrono::Utc;
 use tauri::State;
 use tracing::{info, instrument};
@@ -168,8 +170,17 @@ pub fn tool_definitions_list(_server_id: Option<String>) -> Vec<ToolDefinition> 
 #[tauri::command]
 #[instrument(skip(state, call), target = "infradeck::tool")]
 pub async fn tool_execute(
-    state: State<'_, AppState>,
+    state: tauri::State<'_, AppState>,
     call: ToolCall,
+) -> Result<ToolExecutionResponse, AppError> {
+    execute_tool(state.inner(), call, "user").await
+}
+
+/// Shared Tool → Policy → Executor path used by both the UI command and the AI agent loop.
+pub(crate) async fn execute_tool(
+    state: &AppState,
+    call: ToolCall,
+    actor: &str,
 ) -> Result<ToolExecutionResponse, AppError> {
     let definition = match tools::resolve(&call.name, &call.version) {
         Some(value) => value,
@@ -181,10 +192,10 @@ pub async fn tool_execute(
     };
     if let Err(message) = tools::validate_call(&call, &definition) {
         let result = rejected_result(&call, "TOOL_SCHEMA_INVALID", &message, "failed");
-        append_tool_audit(&state, &call, None, "deny", &result)?;
+        append_tool_audit(state, &call, None, "deny", &result, actor)?;
         return Ok(ToolExecutionResponse::Result { result });
     }
-    let profile = profile_for(&state, call.target.server_id())?;
+    let profile = profile_for(state, call.target.server_id())?;
     let privilege = if profile.username == "root" {
         "root"
     } else if definition.metadata.requires_privilege {
@@ -196,7 +207,7 @@ pub async fn tool_execute(
         PolicyDecision::Deny(risk, reason) => {
             let mut result = rejected_result(&call, "POLICY_DENIED", &reason, "denied");
             result.meta.audit_id = uuid::Uuid::new_v4().to_string();
-            append_tool_audit(&state, &call, Some(&risk), "deny", &result)?;
+            append_tool_audit(state, &call, Some(&risk), "deny", &result, actor)?;
             Ok(ToolExecutionResponse::Result { result })
         }
         PolicyDecision::Confirm(risk) => {
@@ -216,6 +227,7 @@ pub async fn tool_execute(
             let event = audit_for(
                 &call,
                 Some(&risk),
+                actor,
                 "confirm",
                 "success",
                 Some(approval.approval_id.clone()),
@@ -228,7 +240,9 @@ pub async fn tool_execute(
                 .append_audit(&event)?;
             Ok(ToolExecutionResponse::ApprovalRequired { approval })
         }
-        PolicyDecision::Allow(risk) => execute_allowed(&state, call, risk, "allow", None).await,
+        PolicyDecision::Allow(risk) => {
+            execute_allowed(state, call, risk, "allow", None, actor).await
+        }
     }
 }
 
@@ -375,7 +389,15 @@ pub async fn approval_resolve(
         .lock()
         .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
         .remove(&grant.approval_id);
-    execute_allowed(&state, call, risk, "confirm", Some(grant.approval_id)).await
+    execute_allowed(
+        state.inner(),
+        call,
+        risk,
+        "confirm",
+        Some(grant.approval_id),
+        "user",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -391,11 +413,12 @@ pub fn audit_events_list(
 }
 
 async fn execute_allowed(
-    state: &State<'_, AppState>,
+    state: &AppState,
     call: ToolCall,
     risk: policy::RiskAssessment,
     policy_action: &str,
     approval_id: Option<String>,
+    actor: &str,
 ) -> Result<ToolExecutionResponse, AppError> {
     let connection_id = match state
         .ssh
@@ -410,7 +433,7 @@ async fn execute_allowed(
                 "目标服务器未连接",
                 "failed",
             );
-            append_tool_audit(state, &call, Some(&risk), policy_action, &result)?;
+            append_tool_audit(state, &call, Some(&risk), policy_action, &result, actor)?;
             return Ok(ToolExecutionResponse::Result { result });
         }
     };
@@ -419,6 +442,7 @@ async fn execute_allowed(
     let mut event = audit_for(
         &call,
         Some(&risk),
+        actor,
         policy_action,
         &result.status,
         approval_id,
@@ -433,7 +457,7 @@ async fn execute_allowed(
     Ok(ToolExecutionResponse::Result { result })
 }
 
-fn profile_for(state: &State<'_, AppState>, server_id: &str) -> Result<ServerProfile, AppError> {
+fn profile_for(state: &AppState, server_id: &str) -> Result<ServerProfile, AppError> {
     state
         .db
         .lock()
@@ -489,15 +513,17 @@ fn replay_denied(call_id: String, message: &str) -> ToolResult {
     rejected_result(&call, "POLICY_DENIED", message, "denied")
 }
 fn append_tool_audit(
-    state: &State<'_, AppState>,
+    state: &AppState,
     call: &ToolCall,
     risk: Option<&policy::RiskAssessment>,
     action: &str,
     result: &ToolResult,
+    actor: &str,
 ) -> Result<(), AppError> {
     let event = audit_for(
         call,
         risk,
+        actor,
         action,
         &result.status,
         None,
@@ -512,6 +538,7 @@ fn append_tool_audit(
 fn audit_for(
     call: &ToolCall,
     risk: Option<&policy::RiskAssessment>,
+    actor: &str,
     action: &str,
     outcome: &str,
     approval_id: Option<String>,
@@ -521,7 +548,7 @@ fn audit_for(
         id: uuid::Uuid::new_v4().to_string(),
         timestamp: Utc::now().to_rfc3339(),
         workspace_id: "default".into(),
-        actor: "user".into(),
+        actor: actor.into(),
         server_id: Some(call.target.server_id().into()),
         connection_id: None,
         conversation_id: call.conversation_id.clone(),

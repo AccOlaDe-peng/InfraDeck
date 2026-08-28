@@ -220,6 +220,33 @@ impl Database {
         Ok(changed)
     }
 
+    pub fn ai_provider_settings(&self) -> Result<Option<crate::ai::AiProviderSettings>, AppError> {
+        self.conn.query_row("SELECT provider_kind,base_url,model,api_key_credential_id,max_tool_iterations,max_tool_output_chars,updated_at FROM ai_provider_settings WHERE id=1", [], |row| {
+            Ok(crate::ai::AiProviderSettings {
+                provider_kind: row.get(0)?,
+                base_url: row.get(1)?,
+                model: row.get(2)?,
+                api_key_credential_id: row.get(3)?,
+                max_tool_iterations: row.get::<_, i64>(4)?.max(1) as u32,
+                max_tool_output_chars: row.get::<_, i64>(5)?.max(500) as u32,
+                updated_at: row.get(6)?,
+            })
+        })
+        .optional()
+        .map_err(AppError::from)
+    }
+
+    pub fn save_ai_provider_settings(
+        &self,
+        settings: &crate::ai::AiProviderSettings,
+    ) -> Result<(), AppError> {
+        self.conn.execute(
+            "UPDATE ai_provider_settings SET provider_kind=?1,base_url=?2,model=?3,api_key_credential_id=?4,max_tool_iterations=?5,max_tool_output_chars=?6,updated_at=?7 WHERE id=1",
+            params![settings.provider_kind,settings.base_url,settings.model,settings.api_key_credential_id,settings.max_tool_iterations,settings.max_tool_output_chars,settings.updated_at],
+        )?;
+        Ok(())
+    }
+
     pub fn expire_stale_approvals(&self) -> Result<usize, AppError> {
         self.conn.execute("UPDATE approvals SET status='expired',resolved_at=?1 WHERE status IN ('pending','approved')", [Utc::now().to_rfc3339()]).map_err(AppError::from)
     }

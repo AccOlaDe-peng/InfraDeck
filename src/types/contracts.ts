@@ -140,3 +140,11 @@ export interface ApprovalGrant { approvalId: string; requestHash: string; decisi
 export interface ToolResult { callId: string; status: 'success' | 'failed' | 'denied' | 'cancelled' | 'partial'; data?: unknown; summary: string; evidence: Array<{ kind: string; label: string; digestSha256?: string; sanitizedExcerpt?: string }>; changedResources: ResourceTarget[]; warnings: string[]; error?: AppErrorDto; meta: { durationMs: number; truncated: boolean; startedAt: string; finishedAt: string; auditId: string }; }
 export type ToolExecutionResponse = { kind: 'result'; result: ToolResult } | { kind: 'approvalRequired'; approval: ApprovalRequest };
 export interface AuditEvent { id: string; timestamp: string; workspaceId: string; actor: 'user' | 'ai' | 'system'; serverId?: string; connectionId?: string; action: string; toolName?: string; toolVersion?: string; toolCallId?: string; approvalId?: string; riskLevel?: string; policyAction?: string; outcome: string; argumentsDigest?: string; sanitizedDetails: Record<string, unknown>; }
+
+export interface AiProviderSettings { providerKind: string; baseUrl: string; model: string; apiKeyCredentialId?: string; maxToolIterations: number; maxToolOutputChars: number; updatedAt: string; }
+export interface AiProviderSettingsInput { providerKind?: string; baseUrl: string; model: string; apiKey?: string; apiKeyCredentialId?: string; maxToolIterations?: number; maxToolOutputChars?: number; }
+export interface AgentRequest { serverId: ServerId; message: string; conversationId?: string; }
+export interface AgentToolStep { toolCallId: string; name: string; input: unknown; status: 'success' | 'failed' | 'denied' | 'partial' | 'waitingApproval' | 'cancelled' | string; summary?: string; }
+export interface AgentChatMessage { role: string; content?: string; toolCallId?: string; }
+export type AgentRunStatus = 'completed' | 'waitingApproval' | 'failed' | 'cancelled';
+export interface AgentRunDto { runId: string; conversationId: string; serverId: ServerId; status: AgentRunStatus; messages: AgentChatMessage[]; steps: AgentToolStep[]; pendingApproval?: ApprovalRequest; pendingToolCallId?: string; finalText?: string; error?: AppErrorDto; iterations: number; }
