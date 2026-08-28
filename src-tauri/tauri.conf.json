@@ -10,8 +10,24 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "InfraDeck", "width": 1180, "height": 820, "minWidth": 720, "minHeight": 620 }],
-    "security": { "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'" }
+    "windows": [
+      {
+        "title": "InfraDeck",
+        "width": 1180,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 620,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'"
+    }
   },
-  "bundle": { "active": true, "targets": "all" }
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
 }

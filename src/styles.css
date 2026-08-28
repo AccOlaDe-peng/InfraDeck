@@ -241,3 +241,11 @@ footer { margin-top: 22px; color: var(--text-dim); font-size: 11px; }.text-butto
 .settings-nav-item.active { background: var(--bg-hover); color: var(--text); font-weight: 600; }
 .settings-content { overflow-y: auto; padding: 2px 6px; }
 .settings-content h3 { margin-bottom: 14px; font-size: 15px; }
+
+/* Window chrome merged into the top bar (dbx-style single row) */
+.is-mac .topbar { padding-left: 78px; } /* space for the overlaid traffic lights */
+.topbar { user-select: none; }
+.window-controls { display: flex; align-items: center; margin-left: 8px; }
+.window-btn { display: grid; place-items: center; width: 30px; height: 26px; border: 0; border-radius: 5px; color: var(--text-dim); background: transparent; font-size: 11px; }
+.window-btn:hover { background: var(--bg-hover); color: var(--text); }
+.window-btn.close:hover { background: #c4453f; color: #fff; }

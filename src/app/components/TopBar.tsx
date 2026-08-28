@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isMac } from '../../lib/platform';
 
 interface Props {
   healthReady: boolean;
@@ -14,11 +16,14 @@ interface Props {
 }
 
 /**
- * dbx-style global action bar: icon+label buttons for creation/navigation,
- * low-frequency items folded into「更多」. Views open as workspace tabs.
+ * dbx-style global action bar sharing one row with the window controls:
+ * macOS overlays its traffic lights on the left (topbar reserves space),
+ * other platforms get custom min/max/close buttons on the right.
+ * The bar is a drag region; interactive children still receive clicks.
  */
 export default function TopBar(props: Props) {
   const [moreOpen, setMoreOpen] = useState(false);
+  const [maximized, setMaximized] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -30,13 +35,20 @@ export default function TopBar(props: Props) {
     return () => window.removeEventListener('mousedown', onClickAway);
   }, [moreOpen]);
 
+  useEffect(() => {
+    if (isMac) return;
+    const win = getCurrentWindow();
+    const unlisten = win.onResized(() => void win.isMaximized().then(setMaximized));
+    return () => { void unlisten.then((fn) => fn()); };
+  }, []);
+
   return (
-    <header className="topbar">
-      <div className="topbar-brand">
+    <header className="topbar" data-tauri-drag-region>
+      <div className="topbar-brand" data-tauri-drag-region>
         <span className="topbar-logo">▣</span>
         <span className="topbar-name">InfraDeck</span>
       </div>
-      <div className="topbar-actions">
+      <div className="topbar-actions" data-tauri-drag-region>
         <button className="topbar-btn" onClick={props.onAddServer}><span className="topbar-icon">＋</span>新建连接</button>
         <button className="topbar-btn" disabled={!props.connected} onClick={props.onOpenTerminal}><span className="topbar-icon">▶</span>打开终端</button>
         <button
@@ -64,6 +76,13 @@ export default function TopBar(props: Props) {
         <span className="status-dot" />
         {props.healthReady ? '已就绪' : '连接中'}
       </div>
+      {!isMac && (
+        <div className="window-controls">
+          <button className="window-btn" title="最小化" onClick={() => void getCurrentWindow().minimize()}>─</button>
+          <button className="window-btn" title={maximized ? '还原' : '最大化'} onClick={() => void getCurrentWindow().toggleMaximize()}>{maximized ? '❐' : '□'}</button>
+          <button className="window-btn close" title="关闭" onClick={() => void getCurrentWindow().close()}>×</button>
+        </div>
+      )}
     </header>
   );
 }
