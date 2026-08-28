@@ -1,17 +1,21 @@
 use async_trait::async_trait;
+
 use russh::{
     client,
     keys::{
         self, agent::client::AgentClient, PrivateKeyWithHashAlg, PublicKeyBase64,
         PublicKeyOrCertificate,
     },
-    ChannelMsg,
+    ChannelMsg, ChannelReadHalf, ChannelWriteHalf,
 };
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::PathBuf,
-    sync::{Arc, Mutex as StdMutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex, RwLock,
+    },
     time::Duration,
 };
 use tokio::{
@@ -113,7 +117,42 @@ impl client::Handler for Handler {
 pub struct RusshProvider {
     trust_store: Arc<HostKeyTrustStore>,
     sessions: Mutex<HashMap<String, Arc<client::Handle<Handler>>>>,
-    ptys: Mutex<HashMap<String, russh::Channel<client::Msg>>>,
+    ptys: Mutex<HashMap<String, PtyHandle>>,
+}
+
+/// Live terminal: half for writing, shared ring buffer fed by the reader task.
+#[derive(Clone)]
+struct PtyHandle {
+    writer: Arc<ChannelWriteHalf<client::Msg>>,
+    buffer: Arc<PtyBuffer>,
+}
+
+struct PtyBuffer {
+    data: Mutex<Vec<u8>>,
+    closed: AtomicBool,
+}
+
+/// Keep at most the tail 128 KiB so a flood of output cannot exhaust memory.
+const PTY_BUFFER_LIMIT: usize = 128 * 1024;
+
+async fn pty_reader(mut reader: ChannelReadHalf, buffer: Arc<PtyBuffer>) {
+    loop {
+        match reader.wait().await {
+            Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                let mut pending = buffer.data.lock().await;
+                pending.extend_from_slice(data.as_ref());
+                let overflow = pending.len().saturating_sub(PTY_BUFFER_LIMIT);
+                if overflow > 0 {
+                    pending.drain(..overflow);
+                }
+            }
+            Some(ChannelMsg::Eof | ChannelMsg::Close) | None => {
+                buffer.closed.store(true, Ordering::SeqCst);
+                break;
+            }
+            _ => {}
+        }
+    }
 }
 
 impl RusshProvider {
@@ -254,7 +293,19 @@ impl SshProvider for RusshProvider {
             .await
             .map_err(|error| SshError::Provider(format!("request shell: {error}")))?;
         let id = format!("{:?}", channel.id());
-        self.ptys.lock().await.insert(id.clone(), channel);
+        let (reader, writer) = channel.split();
+        let buffer = Arc::new(PtyBuffer {
+            data: Mutex::new(Vec::new()),
+            closed: AtomicBool::new(false),
+        });
+        tokio::spawn(pty_reader(reader, Arc::clone(&buffer)));
+        self.ptys.lock().await.insert(
+            id.clone(),
+            PtyHandle {
+                writer: Arc::new(writer),
+                buffer,
+            },
+        );
         Ok(ProviderPty { id })
     }
 
@@ -325,6 +376,66 @@ impl SshProvider for RusshProvider {
                 .map_err(|error| SshError::Provider(format!("disconnect: {error}")))?;
         }
         Ok(())
+    }
+
+    async fn pty_write(&self, pty_id: &str, data: &[u8]) -> Result<(), SshError> {
+        let handle = self
+            .ptys
+            .lock()
+            .await
+            .get(pty_id)
+            .cloned()
+            .ok_or(SshError::ConnectionNotFound)?;
+        handle
+            .writer
+            .data(&mut std::io::Cursor::new(data))
+            .await
+            .map_err(|error| SshError::Provider(format!("pty write: {error}")))
+    }
+
+    async fn pty_resize(&self, pty_id: &str, cols: u16, rows: u16) -> Result<(), SshError> {
+        let handle = self
+            .ptys
+            .lock()
+            .await
+            .get(pty_id)
+            .cloned()
+            .ok_or(SshError::ConnectionNotFound)?;
+        handle
+            .writer
+            .window_change(cols as u32, rows as u32, 0, 0)
+            .await
+            .map_err(|error| SshError::Provider(format!("pty resize: {error}")))
+    }
+
+    async fn pty_take_output(&self, pty_id: &str) -> Result<super::PtyChunk, SshError> {
+        let handle = self
+            .ptys
+            .lock()
+            .await
+            .get(pty_id)
+            .cloned()
+            .ok_or(SshError::ConnectionNotFound)?;
+        let mut pending = handle.buffer.data.lock().await;
+        let data = std::mem::take(&mut *pending);
+        Ok(super::PtyChunk {
+            data,
+            closed: handle.buffer.closed.load(Ordering::SeqCst),
+        })
+    }
+
+    async fn pty_close(&self, pty_id: &str) -> Result<(), SshError> {
+        let handle = self
+            .ptys
+            .lock()
+            .await
+            .remove(pty_id)
+            .ok_or(SshError::ConnectionNotFound)?;
+        handle
+            .writer
+            .close()
+            .await
+            .map_err(|error| SshError::Provider(format!("pty close: {error}")))
     }
 }
 

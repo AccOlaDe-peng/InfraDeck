@@ -4,12 +4,12 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub version: u32,
     pub permission_mode: PermissionMode,
     pub telemetry_enabled: bool,
+    pub conversation_persistence: bool,
 }
 
 impl Default for AppSettings {
@@ -18,6 +18,7 @@ impl Default for AppSettings {
             version: 1,
             permission_mode: PermissionMode::ConfirmChanges,
             telemetry_enabled: false,
+            conversation_persistence: true,
         }
     }
 }
@@ -31,9 +32,8 @@ pub struct WorkspaceSettings {
     pub active_server_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
     AskOnly,
     ReadOnly,

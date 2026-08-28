@@ -343,11 +343,11 @@ fn invalid_arguments_message(tool_call_id: &str, name: &str, reason: &str) -> St
     .to_string()
 }
 
-struct LoopOutcome {
-    status: String,
-    final_text: Option<String>,
-    error: Option<crate::error::AppErrorDto>,
-    pending_approval: Option<crate::policy::ApprovalRequest>,
+pub(crate) struct LoopOutcome {
+    pub(crate) status: String,
+    pub(crate) final_text: Option<String>,
+    pub(crate) error: Option<crate::error::AppErrorDto>,
+    pub(crate) pending_approval: Option<crate::policy::ApprovalRequest>,
 }
 
 /// The agent loop: THINKING → TOOL_REQUESTED → EXECUTING → TOOL_RESULT → …
@@ -391,6 +391,17 @@ async fn run_loop_inner(
             }
         }
     };
+    run_loop_with_provider(state, run, settings, profile, provider.as_ref()).await
+}
+
+/// Split out so QA tests can drive the loop with a scripted provider.
+pub(crate) async fn run_loop_with_provider(
+    state: &AppState,
+    run: &mut AgentRunState,
+    settings: &AiProviderSettings,
+    profile: &ServerProfile,
+    provider: &dyn LlmProvider,
+) -> LoopOutcome {
     let specs = tool_specs();
     loop {
         if run.token.is_cancelled() {
@@ -491,8 +502,10 @@ async fn run_loop_inner(
                     continue;
                 }
             };
+            // Provider tool-call ids (e.g. "call_abc") are not UUIDs; the wire
+            // contract requires UUID v4, so we mint one and correlate on spec.id.
             let call = tools::ToolCall {
-                id: spec.id.clone(),
+                id: Uuid::new_v4().to_string(),
                 name: spec.name.clone(),
                 version: "1.0.0".into(),
                 input: input.clone(),
@@ -504,11 +517,11 @@ async fn run_loop_inner(
             match super::execute_tool(state, call, "ai").await {
                 Ok(crate::tools::ToolExecutionResponse::Result { result }) => {
                     run.messages.push(ChatMessage::tool_result(
-                        &result.call_id,
+                        &spec.id,
                         tool_message_content(&result, settings.max_tool_output_chars),
                     ));
                     run.steps.push(AgentToolStep {
-                        tool_call_id: result.call_id.clone(),
+                        tool_call_id: spec.id.clone(),
                         name: spec.name.clone(),
                         input: input.clone(),
                         status: result.status.clone(),

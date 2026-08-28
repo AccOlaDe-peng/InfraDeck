@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentRequest, AgentRunDto, AiProviderSettings, AiProviderSettingsInput, ApprovalGrant, AuditEvent, AppErrorDto, ConnectionDto, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult } from '../types/contracts';
+import type { AgentRequest, AgentRunDto, AiProviderSettings, AiProviderSettingsInput, AppSettings, ApprovalGrant, AuditEvent, AppErrorDto, ConnectionDto, ExecRequest, ExecResult, HealthCheckDto, HostKeyCheckDto, HostKeyDecision, PtyOptions, ServerProfile, ServerProfileInput, TerminalReadDto, TerminalSessionDto, ToolCall, ToolDefinition, ToolExecutionResponse, ToolResult } from '../types/contracts';
 
 export class AppError extends Error {
   readonly dto: AppErrorDto;
@@ -46,6 +46,13 @@ export const api = {
   reconnect: (serverId: string) => call<ConnectionDto>('server_reconnect', { serverId }),
   disconnect: (connectionId: string) => call<ConnectionDto>('connection_disconnect', { connectionId }),
   openTerminal: (connectionId: string, options: PtyOptions) => call<TerminalSessionDto>('terminal_open', { connectionId, options }),
+  terminalRead: (sessionId: string) => call<TerminalReadDto>('terminal_read', { sessionId }),
+  terminalWrite: (sessionId: string, data: string) => call<void>('terminal_write', { sessionId, data }),
+  terminalResize: (sessionId: string, cols: number, rows: number) => call<void>('terminal_resize', { sessionId, cols, rows }),
+  terminalClose: (sessionId: string) => call<void>('terminal_close', { sessionId }),
+  getAppSettings: () => call<AppSettings>('app_settings_get'),
+  saveAppSettings: (input: { permissionMode: AppSettings['permissionMode']; conversationPersistence: boolean }) =>
+    call<AppSettings>('app_settings_save', { input }),
   exec: (connectionId: string, request: ExecRequest) => call<ExecResult>('connection_exec', { connectionId, request }),
   hostKeyCheck: (host: string, port: number, algorithm: string, fingerprintSha256: string) => call<HostKeyCheckDto>('host_key_check', { host, port, algorithm, fingerprintSha256 }),
   hostKeyResolve: (decision: HostKeyDecision) => call<void>('host_key_resolve', { decision }),

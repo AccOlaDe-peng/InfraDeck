@@ -1,5 +1,6 @@
 pub mod ai;
 
+use base64::Engine as _;
 use chrono::Utc;
 use tauri::State;
 use tracing::{info, instrument};
@@ -148,6 +149,72 @@ pub async fn terminal_open(
         .map_err(AppError::from)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalReadDto {
+    pub data_base64: String,
+    pub closed: bool,
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::ssh")]
+pub async fn terminal_write(
+    state: State<'_, AppState>,
+    session_id: String,
+    data: String,
+) -> Result<(), AppError> {
+    state
+        .ssh
+        .terminal_write(&session_id, data.as_bytes())
+        .await
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::ssh")]
+pub async fn terminal_read(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<TerminalReadDto, AppError> {
+    let chunk = state
+        .ssh
+        .terminal_read(&session_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(TerminalReadDto {
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&chunk.data),
+        closed: chunk.closed,
+    })
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::ssh")]
+pub async fn terminal_resize(
+    state: State<'_, AppState>,
+    session_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), AppError> {
+    state
+        .ssh
+        .terminal_resize(&session_id, cols, rows)
+        .await
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::ssh")]
+pub async fn terminal_close(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), AppError> {
+    state
+        .ssh
+        .terminal_close(&session_id)
+        .await
+        .map_err(AppError::from)
+}
+
 #[tauri::command]
 #[instrument(skip(state, request), target = "infradeck::ssh")]
 pub async fn connection_exec(
@@ -203,7 +270,8 @@ pub(crate) async fn execute_tool(
     } else {
         "user"
     };
-    match policy::evaluate(&definition, &call, profile.environment, privilege) {
+    let mode = permission_mode(state)?;
+    match policy::evaluate(&definition, &call, profile.environment, privilege, mode) {
         PolicyDecision::Deny(risk, reason) => {
             let mut result = rejected_result(&call, "POLICY_DENIED", &reason, "denied");
             result.meta.audit_id = uuid::Uuid::new_v4().to_string();
@@ -252,6 +320,15 @@ pub async fn approval_resolve(
     state: State<'_, AppState>,
     grant: ApprovalGrant,
 ) -> Result<ToolExecutionResponse, AppError> {
+    resolve_approval(state.inner(), grant).await
+}
+
+/// Shared approval resolution path: the UI command and QA integration tests
+/// both go through this to exercise the full Tool → Policy → Approval chain.
+pub(crate) async fn resolve_approval(
+    state: &AppState,
+    grant: ApprovalGrant,
+) -> Result<ToolExecutionResponse, AppError> {
     let record = state
         .db
         .lock()
@@ -271,9 +348,12 @@ pub async fn approval_resolve(
     }
     let call = pending.expect("checked pending");
     if grant.request_hash != record.request_hash || grant.request_hash.is_empty() {
-        return Ok(ToolExecutionResponse::Result {
-            result: replay_denied(call.id.clone(), "approval hash 不匹配"),
-        });
+        return denied_approval(
+            state,
+            call.id.clone(),
+            Some(grant.approval_id.clone()),
+            "approval hash 不匹配",
+        );
     }
     let expires = DateTime::parse_from_rfc3339(&record.expires_at)
         .map_err(|error| AppError::Internal(error.to_string()))?
@@ -294,9 +374,12 @@ pub async fn approval_resolve(
             .lock()
             .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
             .remove(&grant.approval_id);
-        return Ok(ToolExecutionResponse::Result {
-            result: replay_denied(call.id, "approval 已过期"),
-        });
+        return denied_approval(
+            state,
+            call.id,
+            Some(grant.approval_id.clone()),
+            "approval 已过期",
+        );
     }
     if grant.decision == ApprovalDecision::Reject {
         state
@@ -314,24 +397,36 @@ pub async fn approval_resolve(
             .lock()
             .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
             .remove(&grant.approval_id);
-        return Ok(ToolExecutionResponse::Result {
-            result: replay_denied(call.id, "用户拒绝执行"),
-        });
+        return denied_approval(
+            state,
+            call.id,
+            Some(grant.approval_id.clone()),
+            "用户拒绝执行",
+        );
     }
     let definition = tools::resolve(&call.name, &call.version)
         .ok_or_else(|| AppError::Validation("工具不存在".into()))?;
-    let profile = profile_for(&state, call.target.server_id())?;
+    let profile = profile_for(state, call.target.server_id())?;
     let privilege = if profile.username == "root" {
         "root"
     } else {
         "sudo"
     };
-    let risk = match policy::evaluate(&definition, &call, profile.environment, privilege) {
+    let risk = match policy::evaluate(
+        &definition,
+        &call,
+        profile.environment,
+        privilege,
+        permission_mode(state)?,
+    ) {
         PolicyDecision::Confirm(value) => value,
         _ => {
-            return Ok(ToolExecutionResponse::Result {
-                result: replay_denied(call.id, "policy 已变化"),
-            })
+            return denied_approval(
+                state,
+                call.id,
+                Some(grant.approval_id.clone()),
+                "policy 已变化",
+            )
         }
     };
     if let Err(reason) = policy::validate_approval(
@@ -341,14 +436,15 @@ pub async fn approval_resolve(
         &call.target.label(),
         Utc::now(),
     ) {
-        return Ok(ToolExecutionResponse::Result {
-            result: replay_denied(call.id, reason),
-        });
+        return denied_approval(state, call.id, Some(grant.approval_id.clone()), reason);
     }
     if policy::request_hash(&definition, &call, &risk) != grant.request_hash {
-        return Ok(ToolExecutionResponse::Result {
-            result: replay_denied(call.id, "approval 参数已变化"),
-        });
+        return denied_approval(
+            state,
+            call.id,
+            Some(grant.approval_id.clone()),
+            "approval 参数已变化",
+        );
     }
     let expected = call.target.label();
     let required = if risk.level == policy::RiskLevel::High {
@@ -359,9 +455,12 @@ pub async fn approval_resolve(
     if required == RequiredConfirmation::TypeTarget
         && grant.typed_confirmation.as_deref().map(str::trim) != Some(expected.as_str())
     {
-        return Ok(ToolExecutionResponse::Result {
-            result: replay_denied(call.id, "高风险确认文本不匹配"),
-        });
+        return denied_approval(
+            state,
+            call.id,
+            Some(grant.approval_id.clone()),
+            "高风险确认文本不匹配",
+        );
     }
     {
         let mut db = state
@@ -379,9 +478,12 @@ pub async fn approval_resolve(
             ApprovalStatus::Consumed,
             "user",
         )? {
-            return Ok(ToolExecutionResponse::Result {
-                result: replay_denied(call.id, "approval replay 被阻断"),
-            });
+            return denied_approval(
+                state,
+                call.id,
+                Some(grant.approval_id.clone()),
+                "approval replay 被阻断",
+            );
         }
     }
     state
@@ -390,7 +492,7 @@ pub async fn approval_resolve(
         .map_err(|_| AppError::Internal("pending call lock poisoned".into()))?
         .remove(&grant.approval_id);
     execute_allowed(
-        state.inner(),
+        state,
         call,
         risk,
         "confirm",
@@ -398,6 +500,45 @@ pub async fn approval_resolve(
         "user",
     )
     .await
+}
+
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::storage")]
+pub fn app_settings_get(
+    state: State<'_, AppState>,
+) -> Result<crate::config::AppSettings, AppError> {
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .app_settings()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsInput {
+    pub permission_mode: crate::config::PermissionMode,
+    pub conversation_persistence: bool,
+}
+
+#[tauri::command]
+#[instrument(skip(state, input), target = "infradeck::storage")]
+pub fn app_settings_save(
+    state: State<'_, AppState>,
+    input: AppSettingsInput,
+) -> Result<crate::config::AppSettings, AppError> {
+    let settings = crate::config::AppSettings {
+        version: 1,
+        permission_mode: input.permission_mode,
+        telemetry_enabled: false,
+        conversation_persistence: input.conversation_persistence,
+    };
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+    db.save_app_settings(&settings, input.conversation_persistence)?;
+    Ok(settings)
 }
 
 #[tauri::command]
@@ -457,6 +598,15 @@ async fn execute_allowed(
     Ok(ToolExecutionResponse::Result { result })
 }
 
+fn permission_mode(state: &AppState) -> Result<crate::config::PermissionMode, AppError> {
+    Ok(state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .app_settings()?
+        .permission_mode)
+}
+
 fn profile_for(state: &AppState, server_id: &str) -> Result<ServerProfile, AppError> {
     state
         .db
@@ -496,6 +646,43 @@ fn rejected_result(call: &ToolCall, code: &str, message: &str, status: &str) -> 
             audit_id: uuid::Uuid::new_v4().to_string(),
         },
     }
+}
+/// A denied approval resolution always returns a denied result AND writes an
+/// audit event, so every confirmation decision (reject/expiry/replay) is traceable.
+fn denied_approval(
+    state: &AppState,
+    call_id: String,
+    approval_id: Option<String>,
+    message: &str,
+) -> Result<ToolExecutionResponse, AppError> {
+    let result = replay_denied(call_id, message);
+    let details = serde_json::json!({"reason": message});
+    let event = AuditEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        workspace_id: "default".into(),
+        actor: "user".into(),
+        server_id: None,
+        connection_id: None,
+        conversation_id: None,
+        agent_run_id: None,
+        action: "approval.resolve".into(),
+        tool_name: None,
+        tool_version: None,
+        tool_call_id: Some(result.call_id.clone()),
+        approval_id,
+        risk_level: None,
+        policy_action: Some("deny".into()),
+        outcome: "denied".into(),
+        arguments_digest: None,
+        sanitized_details: details.as_object().cloned().unwrap_or_default(),
+    };
+    state
+        .db
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .append_audit(&event)?;
+    Ok(ToolExecutionResponse::Result { result })
 }
 fn replay_denied(call_id: String, message: &str) -> ToolResult {
     let call = ToolCall {

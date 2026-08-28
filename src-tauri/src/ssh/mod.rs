@@ -120,6 +120,14 @@ pub struct ProviderPty {
     pub id: String,
 }
 
+/// Drained PTY output chunk; `closed` signals the remote side hung up.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyChunk {
+    pub data: Vec<u8>,
+    pub closed: bool,
+}
+
 #[async_trait]
 pub trait SshProvider: Send + Sync {
     async fn connect(
@@ -142,6 +150,11 @@ pub trait SshProvider: Send + Sync {
     ) -> Result<ExecResult, SshError>;
     #[allow(dead_code)]
     async fn disconnect(&self, connection: ProviderConnection) -> Result<(), SshError>;
+    async fn pty_write(&self, pty_id: &str, data: &[u8]) -> Result<(), SshError>;
+    async fn pty_resize(&self, pty_id: &str, cols: u16, rows: u16) -> Result<(), SshError>;
+    /// Drains buffered PTY output accumulated since the last call.
+    async fn pty_take_output(&self, pty_id: &str) -> Result<PtyChunk, SshError>;
+    async fn pty_close(&self, pty_id: &str) -> Result<(), SshError>;
 }
 
 #[async_trait]
@@ -173,10 +186,31 @@ impl<T: SshProvider + ?Sized> SshProvider for Box<T> {
     async fn disconnect(&self, connection: ProviderConnection) -> Result<(), SshError> {
         self.as_ref().disconnect(connection).await
     }
+    async fn pty_write(&self, pty_id: &str, data: &[u8]) -> Result<(), SshError> {
+        self.as_ref().pty_write(pty_id, data).await
+    }
+    async fn pty_resize(&self, pty_id: &str, cols: u16, rows: u16) -> Result<(), SshError> {
+        self.as_ref().pty_resize(pty_id, cols, rows).await
+    }
+    async fn pty_take_output(&self, pty_id: &str) -> Result<PtyChunk, SshError> {
+        self.as_ref().pty_take_output(pty_id).await
+    }
+    async fn pty_close(&self, pty_id: &str) -> Result<(), SshError> {
+        self.as_ref().pty_close(pty_id).await
+    }
 }
 
 #[derive(Default)]
-pub struct MockSshProvider;
+pub struct MockSshProvider {
+    ptys: Mutex<HashMap<String, MockPty>>,
+}
+
+#[derive(Default)]
+struct MockPty {
+    echoed: Vec<u8>,
+    pending: Vec<u8>,
+    closed: bool,
+}
 
 #[async_trait]
 impl SshProvider for MockSshProvider {
@@ -215,9 +249,9 @@ impl SshProvider for MockSshProvider {
         if options.cols < 20 || options.cols > 500 || options.rows < 5 || options.rows > 300 {
             return Err(SshError::Provider("invalid PTY dimensions".into()));
         }
-        Ok(ProviderPty {
-            id: format!("pty:{}", connection.id),
-        })
+        let id = format!("pty:{}", connection.id);
+        self.ptys.lock().await.entry(id.clone()).or_default();
+        Ok(ProviderPty { id })
     }
     async fn exec(
         &self,
@@ -252,6 +286,41 @@ impl SshProvider for MockSshProvider {
             stderr_bytes: 0,
             signal: None,
         })
+    }
+
+    async fn pty_write(&self, pty_id: &str, data: &[u8]) -> Result<(), SshError> {
+        let mut ptys = self.ptys.lock().await;
+        let pty = ptys.get_mut(pty_id).ok_or(SshError::ConnectionNotFound)?;
+        pty.echoed.extend_from_slice(data);
+        pty.pending.extend_from_slice(data);
+        Ok(())
+    }
+
+    async fn pty_resize(&self, pty_id: &str, cols: u16, rows: u16) -> Result<(), SshError> {
+        let ptys = self.ptys.lock().await;
+        if !ptys.contains_key(pty_id) {
+            return Err(SshError::ConnectionNotFound);
+        }
+        if cols == 0 || rows == 0 {
+            return Err(SshError::Provider("invalid PTY dimensions".into()));
+        }
+        Ok(())
+    }
+
+    async fn pty_take_output(&self, pty_id: &str) -> Result<PtyChunk, SshError> {
+        let mut ptys = self.ptys.lock().await;
+        let pty = ptys.get_mut(pty_id).ok_or(SshError::ConnectionNotFound)?;
+        Ok(PtyChunk {
+            data: std::mem::take(&mut pty.pending),
+            closed: pty.closed,
+        })
+    }
+
+    async fn pty_close(&self, pty_id: &str) -> Result<(), SshError> {
+        let mut ptys = self.ptys.lock().await;
+        let pty = ptys.get_mut(pty_id).ok_or(SshError::ConnectionNotFound)?;
+        pty.closed = true;
+        Ok(())
     }
 }
 
@@ -299,6 +368,8 @@ pub fn transition(dto: &mut ConnectionDto, next: ConnectionState) -> Result<(), 
 pub struct SshManager<P> {
     provider: P,
     registry: Mutex<HashMap<String, (ConnectionDto, ProviderConnection)>>,
+    /// session_id → (pty id, owning connection id)
+    terminal_sessions: Mutex<HashMap<String, (String, String)>>,
     active_channels: Mutex<usize>,
 }
 
@@ -307,7 +378,72 @@ impl<P: SshProvider> SshManager<P> {
         Self {
             provider,
             registry: Mutex::new(HashMap::new()),
+            terminal_sessions: Mutex::new(HashMap::new()),
             active_channels: Mutex::new(0),
+        }
+    }
+
+    fn resolve_pty<'a>(
+        sessions: &'a HashMap<String, (String, String)>,
+        session_id: &str,
+    ) -> Result<&'a str, SshError> {
+        sessions
+            .get(session_id)
+            .map(|(pty_id, _)| pty_id.as_str())
+            .ok_or(SshError::ConnectionNotFound)
+    }
+
+    pub async fn terminal_write(&self, session_id: &str, data: &[u8]) -> Result<(), SshError> {
+        let sessions = self.terminal_sessions.lock().await;
+        let pty_id = Self::resolve_pty(&sessions, session_id)?;
+        self.provider.pty_write(pty_id, data).await
+    }
+
+    pub async fn terminal_resize(
+        &self,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), SshError> {
+        let sessions = self.terminal_sessions.lock().await;
+        let pty_id = Self::resolve_pty(&sessions, session_id)?;
+        self.provider.pty_resize(pty_id, cols, rows).await
+    }
+
+    pub async fn terminal_read(&self, session_id: &str) -> Result<PtyChunk, SshError> {
+        let sessions = self.terminal_sessions.lock().await;
+        let pty_id = Self::resolve_pty(&sessions, session_id)?;
+        self.provider.pty_take_output(pty_id).await
+    }
+
+    pub async fn terminal_close(&self, session_id: &str) -> Result<(), SshError> {
+        let pty_id = {
+            let mut sessions = self.terminal_sessions.lock().await;
+            sessions
+                .remove(session_id)
+                .map(|(pty_id, _)| pty_id)
+                .ok_or(SshError::ConnectionNotFound)?
+        };
+        self.provider.pty_close(&pty_id).await
+    }
+
+    /// Closes and forgets every terminal session owned by `connection_id`.
+    /// Called on disconnect so no PTY outlives its connection.
+    pub async fn close_terminal_sessions_of(&self, connection_id: &str) {
+        let ptys: Vec<String> = {
+            let mut sessions = self.terminal_sessions.lock().await;
+            let owned: Vec<(String, String)> = sessions
+                .iter()
+                .filter(|(_, (_, owner))| owner == connection_id)
+                .map(|(session_id, (pty_id, _))| (session_id.clone(), pty_id.clone()))
+                .collect();
+            for (session_id, _) in &owned {
+                sessions.remove(session_id);
+            }
+            owned.into_iter().map(|(_, pty_id)| pty_id).collect()
+        };
+        for pty_id in ptys {
+            let _ = self.provider.pty_close(&pty_id).await;
         }
     }
 
@@ -344,6 +480,7 @@ impl<P: SshProvider> SshManager<P> {
     }
 
     pub async fn disconnect(&self, id: &str) -> Result<ConnectionDto, SshError> {
+        self.close_terminal_sessions_of(id).await;
         let (mut dto, provider_connection) = {
             let mut registry = self.registry.lock().await;
             registry.remove(id).ok_or(SshError::ConnectionNotFound)?
@@ -409,8 +546,13 @@ impl<P: SshProvider> SshManager<P> {
         drop(registry);
         self.release_channel().await;
         let pty = result?;
+        let session_id = Uuid::new_v4().to_string();
+        self.terminal_sessions.lock().await.insert(
+            session_id.clone(),
+            (pty.id.clone(), connection_id.to_string()),
+        );
         Ok(TerminalSessionDto {
-            session_id: Uuid::new_v4().to_string(),
+            session_id,
             terminal_id: pty.id,
             connection_id: connection_id.into(),
             state: "open".into(),
@@ -532,7 +674,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        let manager = SshManager::new(MockSshProvider);
+        let manager = SshManager::new(MockSshProvider::default());
         let first = manager.connect(&profile, None).await.expect("connect");
         let second = manager.connect(&profile, None).await.expect("deduplicate");
         assert_eq!(first.id, second.id);
@@ -554,7 +696,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        let manager = SshManager::new(MockSshProvider);
+        let manager = SshManager::new(MockSshProvider::default());
         let first = manager.connect(&profile, None).await.expect("connect");
         let second = manager.reconnect(&profile, None).await.expect("reconnect");
         assert_ne!(first.id, second.id);
@@ -577,7 +719,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        let manager = SshManager::new(MockSshProvider);
+        let manager = SshManager::new(MockSshProvider::default());
         let connection = manager.connect(&profile, None).await.expect("connect");
         let pty = manager
             .open_pty(
@@ -627,7 +769,7 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        let manager = SshManager::new(MockSshProvider);
+        let manager = SshManager::new(MockSshProvider::default());
         let connection = manager.connect(&profile, None).await.expect("connect");
         let result = manager
             .exec(
@@ -643,6 +785,98 @@ mod tests {
             )
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_io_round_trip_then_close() {
+        let profile = ServerProfile {
+            id: "server-term".into(),
+            name: "test".into(),
+            host: "localhost".into(),
+            port: 22,
+            username: "dev".into(),
+            auth: crate::models::AuthRef::Agent,
+            environment: crate::models::Environment::Dev,
+            tags: vec![],
+            connect_timeout_ms: 15_000,
+            keep_alive_interval_sec: 30,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let manager = SshManager::new(MockSshProvider::default());
+        let connection = manager.connect(&profile, None).await.expect("connect");
+        let session = manager
+            .open_pty(
+                &connection.id,
+                PtyOptions {
+                    terminal_type: "xterm-256color".into(),
+                    cols: 80,
+                    rows: 24,
+                    cwd: None,
+                    env: HashMap::new(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("pty");
+        manager
+            .terminal_write(&session.session_id, b"echo hi\n")
+            .await
+            .expect("write");
+        let chunk = manager
+            .terminal_read(&session.session_id)
+            .await
+            .expect("read");
+        assert_eq!(chunk.data, b"echo hi\n");
+        assert!(!chunk.closed);
+        manager
+            .terminal_resize(&session.session_id, 120, 40)
+            .await
+            .expect("resize");
+        manager
+            .terminal_close(&session.session_id)
+            .await
+            .expect("close");
+        assert!(manager.terminal_read(&session.session_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnect_closes_terminal_sessions_of_the_connection() {
+        let profile = ServerProfile {
+            id: "server-term-drop".into(),
+            name: "test".into(),
+            host: "localhost".into(),
+            port: 22,
+            username: "dev".into(),
+            auth: crate::models::AuthRef::Agent,
+            environment: crate::models::Environment::Dev,
+            tags: vec![],
+            connect_timeout_ms: 15_000,
+            keep_alive_interval_sec: 30,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let manager = SshManager::new(MockSshProvider::default());
+        let connection = manager.connect(&profile, None).await.expect("connect");
+        let session = manager
+            .open_pty(
+                &connection.id,
+                PtyOptions {
+                    terminal_type: "xterm-256color".into(),
+                    cols: 80,
+                    rows: 24,
+                    cwd: None,
+                    env: HashMap::new(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .expect("pty");
+        manager
+            .disconnect(&connection.id)
+            .await
+            .expect("disconnect");
+        assert!(manager.terminal_read(&session.session_id).await.is_err());
     }
 
     #[tokio::test]
@@ -663,7 +897,9 @@ mod tests {
         };
         let cancel = CancellationToken::new();
         cancel.cancel();
-        let result = MockSshProvider.connect(&profile, None, cancel).await;
+        let result = MockSshProvider::default()
+            .connect(&profile, None, cancel)
+            .await;
         assert!(matches!(result, Err(SshError::Provider(message)) if message == "cancelled"));
     }
 }

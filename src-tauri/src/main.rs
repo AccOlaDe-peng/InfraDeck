@@ -7,6 +7,8 @@ mod error;
 mod models;
 mod platform;
 mod policy;
+#[cfg(test)]
+mod qa;
 mod ssh;
 mod storage;
 mod tools;
@@ -30,6 +32,10 @@ fn main() {
             commands::server_reconnect,
             commands::connection_disconnect,
             commands::terminal_open,
+            commands::terminal_read,
+            commands::terminal_write,
+            commands::terminal_resize,
+            commands::terminal_close,
             commands::connection_exec,
             commands::host_key_check,
             commands::host_key_resolve,
@@ -40,6 +46,8 @@ fn main() {
             commands::tool_execute,
             commands::approval_resolve,
             commands::audit_events_list,
+            commands::app_settings_get,
+            commands::app_settings_save,
             commands::ai::ai_provider_settings_get,
             commands::ai::ai_provider_settings_save,
             commands::ai::agent_send,

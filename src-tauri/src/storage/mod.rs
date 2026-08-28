@@ -247,6 +247,60 @@ impl Database {
         Ok(())
     }
 
+    pub fn app_settings(&self) -> Result<crate::config::AppSettings, AppError> {
+        let row = self.conn.query_row(
+            "SELECT permission_mode,telemetry_enabled,conversation_persistence_enabled FROM app_settings WHERE id=1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        );
+        let default = || crate::config::AppSettings {
+            telemetry_enabled: false,
+            conversation_persistence: true,
+            ..crate::config::AppSettings::default()
+        };
+        match row {
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(default()),
+            Err(error) => Err(error.into()),
+            Ok((mode, telemetry, persistence)) => Ok(crate::config::AppSettings {
+                version: 1,
+                permission_mode: match mode.as_str() {
+                    "readOnly" => crate::config::PermissionMode::ReadOnly,
+                    "advanced" => crate::config::PermissionMode::Advanced,
+                    "restricted" => crate::config::PermissionMode::Restricted,
+                    "askOnly" => crate::config::PermissionMode::AskOnly,
+                    _ => crate::config::PermissionMode::ConfirmChanges,
+                },
+                telemetry_enabled: telemetry != 0,
+                conversation_persistence: persistence != 0,
+            }),
+        }
+    }
+
+    pub fn save_app_settings(
+        &self,
+        settings: &crate::config::AppSettings,
+        conversation_persistence: bool,
+    ) -> Result<(), AppError> {
+        let mode = match settings.permission_mode {
+            crate::config::PermissionMode::AskOnly => "askOnly",
+            crate::config::PermissionMode::ReadOnly => "readOnly",
+            crate::config::PermissionMode::ConfirmChanges => "confirmChanges",
+            crate::config::PermissionMode::Advanced => "advanced",
+            crate::config::PermissionMode::Restricted => "restricted",
+        };
+        self.conn.execute(
+            "UPDATE app_settings SET permission_mode=?1,telemetry_enabled=?2,conversation_persistence_enabled=?3,updated_at=?4 WHERE id=1",
+            params![mode, settings.telemetry_enabled as i64, conversation_persistence as i64, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     pub fn expire_stale_approvals(&self) -> Result<usize, AppError> {
         self.conn.execute("UPDATE approvals SET status='expired',resolved_at=?1 WHERE status IN ('pending','approved')", [Utc::now().to_rfc3339()]).map_err(AppError::from)
     }

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    config::PermissionMode,
     models::Environment,
     tools::{ToolCall, ToolDefinition},
 };
@@ -136,11 +137,14 @@ pub enum PolicyDecision {
     Deny(RiskAssessment, String),
 }
 
+/// `mode` is the workspace permission mode selected in Settings; it can only
+/// tighten decisions (fail-closed), never loosen a Deny or skip a hard block.
 pub fn evaluate(
     definition: &ToolDefinition,
     call: &ToolCall,
     environment: Environment,
     privilege: &str,
+    mode: PermissionMode,
 ) -> PolicyDecision {
     if let Some(rule) = hard_block(call) {
         let risk = RiskAssessment {
@@ -193,9 +197,35 @@ pub fn evaluate(
         matched_rules: Vec::new(),
     };
     if definition.metadata.mutation {
-        PolicyDecision::Confirm(risk)
-    } else {
-        PolicyDecision::Allow(risk)
+        return PolicyDecision::Confirm(risk);
+    }
+    match mode {
+        PermissionMode::ReadOnly => PolicyDecision::Deny(
+            RiskAssessment {
+                level: RiskLevel::High,
+                score: score.max(60) as u8,
+                reasons: vec!["只读权限模式下禁止工具执行".into()],
+                matched_rules: vec!["MODE-READ-ONLY".into()],
+            },
+            "当前为只读权限模式，操作被拒绝".into(),
+        ),
+        PermissionMode::AskOnly => PolicyDecision::Confirm(risk),
+        PermissionMode::ConfirmChanges | PermissionMode::Advanced => PolicyDecision::Allow(risk),
+        PermissionMode::Restricted => {
+            if call.name == "shell.execute" {
+                PolicyDecision::Deny(
+                    RiskAssessment {
+                        level: RiskLevel::High,
+                        score: score.max(60) as u8,
+                        reasons: vec!["受限权限模式下禁用 shell fallback".into()],
+                        matched_rules: vec!["MODE-RESTRICTED".into()],
+                    },
+                    "受限权限模式下 shell.execute 被禁用".into(),
+                )
+            } else {
+                PolicyDecision::Allow(risk)
+            }
+        }
     }
 }
 
@@ -373,6 +403,7 @@ mod tests {
             &call("service.restart", serde_json::json!({"service":"nginx"})),
             Environment::Production,
             "root",
+            PermissionMode::ConfirmChanges,
         );
         assert!(matches!(
             decision,
@@ -402,7 +433,13 @@ mod tests {
             };
             assert!(
                 matches!(
-                    evaluate(&definition, &call, Environment::Production, "root"),
+                    evaluate(
+                        &definition,
+                        &call,
+                        Environment::Production,
+                        "root",
+                        PermissionMode::ConfirmChanges
+                    ),
                     PolicyDecision::Allow(_)
                 ),
                 "{} unexpectedly requires approval",
@@ -419,6 +456,7 @@ mod tests {
             &call("shell.execute", serde_json::json!({"command":"rm -rf /"})),
             Environment::Dev,
             "user",
+            PermissionMode::ConfirmChanges,
         );
         assert!(matches!(
             decision,
@@ -502,5 +540,63 @@ mod tests {
         let (record, mut grant) = approval_fixture();
         grant.typed_confirmation = Some("other".into());
         assert!(validate_approval(&record, &grant, "hash", "server/nginx", Utc::now()).is_err());
+    }
+
+    #[test]
+    fn read_only_mode_denies_even_read_only_tools() {
+        // ReadOnly means "no tool execution at all", fail-closed for mutations too.
+        let decision = evaluate(
+            &definition(false),
+            &call("service.status", serde_json::json!({"service":"nginx"})),
+            Environment::Dev,
+            "user",
+            PermissionMode::ReadOnly,
+        );
+        assert!(matches!(decision, PolicyDecision::Deny(_, _)));
+        let mutation = evaluate(
+            &definition(true),
+            &call("service.restart", serde_json::json!({"service":"nginx"})),
+            Environment::Dev,
+            "user",
+            PermissionMode::ReadOnly,
+        );
+        assert!(
+            matches!(mutation, PolicyDecision::Confirm(_)),
+            "mutation stays on the confirm path"
+        );
+    }
+
+    #[test]
+    fn ask_only_mode_converts_reads_to_confirmations() {
+        let decision = evaluate(
+            &definition(false),
+            &call("system.memory", serde_json::json!({})),
+            Environment::Dev,
+            "user",
+            PermissionMode::AskOnly,
+        );
+        assert!(matches!(decision, PolicyDecision::Confirm(_)));
+    }
+
+    #[test]
+    fn restricted_mode_blocks_shell_fallback_but_keeps_tools() {
+        let mut shell = definition(false);
+        shell.name = "shell.execute".into();
+        let blocked = evaluate(
+            &shell,
+            &call("shell.execute", serde_json::json!({"command":"ls"})),
+            Environment::Dev,
+            "user",
+            PermissionMode::Restricted,
+        );
+        assert!(matches!(blocked, PolicyDecision::Deny(_, _)));
+        let allowed = evaluate(
+            &definition(false),
+            &call("system.memory", serde_json::json!({})),
+            Environment::Dev,
+            "user",
+            PermissionMode::Restricted,
+        );
+        assert!(matches!(allowed, PolicyDecision::Allow(_)));
     }
 }

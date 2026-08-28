@@ -1,25 +1,26 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api, AppError } from '../lib/tauri';
-import type { AgentRunDto, AiProviderSettings, ApprovalRequest, AuthRef, ConnectionDto, Environment, HealthCheckDto, ExecResult, ResourceTarget, ServerProfile, ServerProfileInput, ToolResult } from '../types/contracts';
+import { TOOL_COMMANDS, buildTarget, type ToolCommandMeta } from '../lib/commandMeta';
+import type {
+  AgentRunDto, AiProviderSettings, ApprovalRequest, AppSettings, ConnectionDto,
+  HealthCheckDto, ServerProfile, ToolResult,
+} from '../types/contracts';
+import ServerSidebar from './components/ServerSidebar';
+import TerminalTabs, { type TerminalTab } from './components/TerminalTabs';
+import AiPanel from './components/AiPanel';
+import QuickActions from './components/QuickActions';
+import SettingsDialog from './components/SettingsDialog';
+import CommandPalette, { type PaletteCommand } from './components/CommandPalette';
+import ProfileForm from './components/ProfileForm';
 
 type HostKeyPrompt = { serverId: string; host: string; port: number; algorithm: string; fingerprintSha256: string };
 
-const emptyProfile = (): ServerProfileInput => ({
-  id: crypto.randomUUID(),
-  name: '',
-  host: '',
-  port: 22,
-  username: '',
-  auth: { kind: 'agent' },
-  environment: 'unknown',
-  tags: [],
-  connectTimeoutMs: 15000,
-  keepAliveIntervalSec: 30,
-});
-
 function errorMessage(error: unknown): string {
   if (error instanceof AppError) {
-    if (error.dto.code === 'CREDENTIAL_NOT_FOUND' || (error.dto.code === 'CREDENTIAL_PROVIDER_ERROR' && /No matching entry|not found|secure storage/i.test(error.message))) return '系统凭据不存在，请点击“编辑”，重新输入密码或私钥口令并保存。';
+    if (error.dto.code === 'CREDENTIAL_NOT_FOUND' || (error.dto.code === 'CREDENTIAL_PROVIDER_ERROR' && /No matching entry|not found|secure storage/i.test(error.message))) {
+      return '系统凭据不存在，请重新编辑服务器并输入凭据。';
+    }
+    if (error.dto.code === 'SSH_HOST_KEY_REQUIRED') return '需要确认服务器 Host Key。';
     return `${error.dto.code}: ${error.message}`;
   }
   return error instanceof Error ? error.message : '操作失败，请重试。';
@@ -28,381 +29,405 @@ function errorMessage(error: unknown): string {
 export default function App() {
   const [health, setHealth] = useState<HealthCheckDto>();
   const [profiles, setProfiles] = useState<ServerProfile[]>([]);
-  const [profile, setProfile] = useState<ServerProfileInput>(emptyProfile);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
-  const [busy, setBusy] = useState(false);
-  const [authKind, setAuthKind] = useState<AuthRef['kind']>('agent');
-  const [secret, setSecret] = useState('');
-  const [keyPath, setKeyPath] = useState('');
   const [connections, setConnections] = useState<Record<string, ConnectionDto>>({});
-  const [connectionBusy, setConnectionBusy] = useState<string>();
-  const [outputs, setOutputs] = useState<Record<string, ExecResult>>({});
+  const [selectedServerId, setSelectedServerId] = useState<string>();
+  const [busyServerId, setBusyServerId] = useState<string>();
+
+  const [tabs, setTabs] = useState<TerminalTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string>();
+
+  const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string }>();
   const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt>();
-  const [editingProfileId, setEditingProfileId] = useState<string>();
-  const [pendingApproval, setPendingApproval] = useState<ApprovalRequest>();
-  const [toolResults, setToolResults] = useState<Record<string, ToolResult>>({});
-  const [aiSettings, setAiSettings] = useState<AiProviderSettings>();
-  const [aiBaseUrl, setAiBaseUrl] = useState('https://api.openai.com/v1');
-  const [aiModel, setAiModel] = useState('gpt-4o-mini');
-  const [aiApiKey, setAiApiKey] = useState('');
-  const [aiMaxIterations, setAiMaxIterations] = useState(8);
-  const [aiTarget, setAiTarget] = useState('');
-  const [aiInput, setAiInput] = useState('');
+  const [userApproval, setUserApproval] = useState<ApprovalRequest>();
+
   const [aiRun, setAiRun] = useState<AgentRunDto>();
-  const [agentApproval, setAgentApproval] = useState<ApprovalRequest>();
+  const [aiApproval, setAiApproval] = useState<ApprovalRequest>();
+  const [aiInput, setAiInput] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiProvider, setAiProvider] = useState<AiProviderSettings>();
+  const [appSettings, setAppSettings] = useState<AppSettings>();
+
+  const [showProfileForm, setShowProfileForm] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<ServerProfile>();
+  const [showSettings, setShowSettings] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [lastToolResult, setLastToolResult] = useState<ToolResult>();
+
+  const selectedServer = profiles.find((item) => item.id === selectedServerId);
+  const connectedServers = profiles.filter((item) => connections[item.id]?.state === 'connected');
+  const notify = (text: string) => setBanner({ kind: 'success', text });
 
   const refresh = async () => {
-    setError(undefined);
     try {
-      const [healthResult, savedProfiles, providerSettings] = await Promise.all([
-        api.healthCheck(),
-        api.listServerProfiles(),
-        api.getAiProviderSettings(),
+      const [healthResult, savedProfiles, provider, settings] = await Promise.all([
+        api.healthCheck(), api.listServerProfiles(), api.getAiProviderSettings(), api.getAppSettings(),
       ]);
       setHealth(healthResult);
       setProfiles(savedProfiles);
-      if (providerSettings) {
-        setAiSettings(providerSettings);
-        setAiBaseUrl(providerSettings.baseUrl);
-        setAiModel(providerSettings.model);
-        setAiMaxIterations(providerSettings.maxToolIterations);
-      }
-    } catch (cause) { setError(errorMessage(cause)); }
+      setAiProvider(provider ?? undefined);
+      setAppSettings(settings);
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
   };
 
-  const resolveHostKey = async (decision: 'trustOnce' | 'trustAndSave' | 'reject') => {
-    if (!hostKeyPrompt) return;
-    try {
-      await api.hostKeyResolve({ host: hostKeyPrompt.host, port: hostKeyPrompt.port, algorithm: hostKeyPrompt.algorithm, fingerprintSha256: hostKeyPrompt.fingerprintSha256, decision });
-      const server = profiles.find((item) => item.id === hostKeyPrompt.serverId);
-      setHostKeyPrompt(undefined);
-      setError(undefined);
-      if (decision !== 'reject' && server) await connect(server);
-    } catch (cause) { setError(errorMessage(cause)); }
-  };
+  useEffect(() => { void refresh(); }, []);
 
   useEffect(() => {
-    void refresh();
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
   }, []);
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(undefined);
-    setNotice(undefined);
-    try {
-      let auth: AuthRef = { kind: 'agent' };
-      if (authKind === 'password') {
-        const previousId = profile.auth.kind === 'password' ? profile.auth.credentialId : undefined;
-        if (!secret && !previousId) throw new Error('请输入 SSH 密码。');
-        // A new secret always gets a fresh reference. This repairs profiles whose
-        // old keychain entry was deleted or came from another installation.
-        const credential = secret ? await api.setCredential(undefined, secret) : { credentialId: previousId as string };
-        auth = { kind: 'password', credentialId: credential.credentialId };
-      } else if (authKind === 'privateKey') {
-        const previousId = profile.auth.kind === 'privateKey' ? profile.auth.passphraseCredentialId : undefined;
-        if (!keyPath.trim()) throw new Error('请输入私钥路径。');
-        let passphraseCredentialId = previousId;
-        if (secret) passphraseCredentialId = (await api.setCredential(undefined, secret)).credentialId;
-        auth = { kind: 'privateKey', keyPath: keyPath.trim(), ...(passphraseCredentialId ? { passphraseCredentialId } : {}) };
-      }
-      const saved = await api.saveServerProfile({
-        ...profile,
-        auth,
-        port: Number(profile.port),
-        tags: profile.tags,
-      });
-      setProfiles((current) => [saved, ...current.filter((item) => item.id !== saved.id)]);
-      setProfile(emptyProfile());
-      setAuthKind('agent');
-      setSecret('');
-      setKeyPath('');
-      setEditingProfileId(undefined);
-      setNotice(`已保存服务器「${saved.name}」。`);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setBusy(false);
-    }
+  // ---------------------------------------------------------------- servers
+
+  const ensureConnected = async (item: ServerProfile): Promise<ConnectionDto> => {
+    const existing = connections[item.id];
+    if (existing?.state === 'connected') return existing;
+    const connection = await api.connect(item.id);
+    setConnections((current) => ({ ...current, [item.id]: connection }));
+    setSelectedServerId(item.id);
+    return connection;
   };
 
-  const update = <K extends keyof ServerProfileInput>(key: K, value: ServerProfileInput[K]) =>
-    setProfile((current) => ({ ...current, [key]: value }));
-
   const connect = async (item: ServerProfile) => {
-    setConnectionBusy(item.id);
-    setError(undefined);
+    setBusyServerId(item.id);
     try {
-      if (item.auth.kind === 'password') {
-        const exists = await api.credentialExists(item.auth.credentialId);
-        if (!exists) {
-          editProfile(item);
-          throw new Error('系统凭据不存在，已打开编辑表单。请重新输入 SSH 密码并保存。');
+      for (const credentialId of credentialRefsOf(item)) {
+        if (!await api.credentialExists(credentialId)) {
+          setEditingProfile(item);
+          setShowProfileForm(true);
+          throw new Error('系统凭据不存在，已打开编辑表单，请重新输入凭据并保存。');
         }
       }
-      if (item.auth.kind === 'privateKey' && item.auth.passphraseCredentialId) {
-        const exists = await api.credentialExists(item.auth.passphraseCredentialId);
-        if (!exists) {
-          editProfile(item);
-          throw new Error('私钥口令凭据不存在，已打开编辑表单。请重新输入私钥口令并保存。');
-        }
-      }
-      const connection = await api.connect(item.id);
-      setConnections((current) => ({ ...current, [item.id]: connection }));
-      setNotice(`已连接「${item.name}」。`);
+      const connection = await ensureConnected(item);
+      notify(`已连接「${connection.state === 'connected' ? item.name : item.name}」。`);
     } catch (cause) {
-      if (cause instanceof AppError && cause.dto.code === 'CREDENTIAL_NOT_FOUND') editProfile(item);
       if (cause instanceof AppError && cause.dto.code === 'SSH_HOST_KEY_REQUIRED') {
         const details = cause.dto.details ?? {};
         if (typeof details.host === 'string' && typeof details.port === 'number' && typeof details.algorithm === 'string' && typeof details.fingerprintSha256 === 'string') {
           setHostKeyPrompt({ serverId: item.id, host: details.host, port: details.port, algorithm: details.algorithm, fingerprintSha256: details.fingerprintSha256 });
         }
       }
-      setError(errorMessage(cause));
-    } finally {
-      setConnectionBusy(undefined);
-    }
+      setBanner({ kind: 'error', text: errorMessage(cause) });
+    } finally { setBusyServerId(undefined); }
   };
 
-  const editProfile = (item: ServerProfile) => {
-    setProfile({ id: item.id, name: item.name, host: item.host, port: item.port, username: item.username, auth: item.auth, environment: item.environment, tags: item.tags, connectTimeoutMs: item.connectTimeoutMs, keepAliveIntervalSec: item.keepAliveIntervalSec });
-    setAuthKind(item.auth.kind);
-    setKeyPath(item.auth.kind === 'privateKey' ? item.auth.keyPath : '');
-    setSecret('');
-    setNotice(`正在编辑「${item.name}」，请输入新的凭据后保存。`);
-    setError(undefined);
-    setEditingProfileId(item.id);
-  };
-
-  const cancelEdit = () => {
-    setProfile(emptyProfile());
-    setAuthKind('agent');
-    setSecret('');
-    setKeyPath('');
-    setEditingProfileId(undefined);
-    setNotice(undefined);
-    setError(undefined);
+  const credentialRefsOf = (item: ServerProfile): string[] => {
+    if (item.auth.kind === 'password') return [item.auth.credentialId];
+    if (item.auth.kind === 'privateKey' && item.auth.passphraseCredentialId) return [item.auth.passphraseCredentialId];
+    return [];
   };
 
   const disconnect = async (item: ServerProfile) => {
     const connection = connections[item.id];
     if (!connection) return;
-    setConnectionBusy(item.id);
+    setBusyServerId(item.id);
     try {
       await api.disconnect(connection.id);
       setConnections((current) => { const next = { ...current }; delete next[item.id]; return next; });
-      setOutputs((current) => { const next = { ...current }; delete next[item.id]; return next; });
-      setNotice(`已断开「${item.name}」。`);
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { setConnectionBusy(undefined); }
+      notify(`已断开「${item.name}」。`);
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    finally { setBusyServerId(undefined); }
   };
 
   const reconnect = async (item: ServerProfile) => {
-    setConnectionBusy(item.id);
-    setError(undefined);
+    setBusyServerId(item.id);
     try {
       const connection = await api.reconnect(item.id);
       setConnections((current) => ({ ...current, [item.id]: connection }));
-      setOutputs((current) => { const next = { ...current }; delete next[item.id]; return next; });
-      setNotice(`已重新连接「${item.name}」。`);
-    } catch (cause) {
-      setError(errorMessage(cause));
-    } finally {
-      setConnectionBusy(undefined);
+      setSelectedServerId(item.id);
+      notify(`已重新连接「${item.name}」。`);
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    finally { setBusyServerId(undefined); }
+  };
+
+  // --------------------------------------------------------------- terminals
+
+  const openTerminalFor = async (item: ServerProfile) => {
+    if (tabs.some((tab) => tab.serverId === item.id && !tab.closed)) {
+      setActiveTabId(tabs.find((tab) => tab.serverId === item.id)?.id);
+      return;
     }
-  };
-
-  const runTool = async (item: ServerProfile, name: string, input: Record<string, unknown>, target: ResourceTarget = { kind: 'server', serverId: item.id }) => {
-    setConnectionBusy(item.id); setError(undefined);
+    setBusyServerId(item.id);
     try {
-      const response = await api.executeTool({ id: crypto.randomUUID(), name, version: '1.0.0', input, target, requestedAt: new Date().toISOString() });
-      if (response.kind === 'approvalRequired') { setPendingApproval(response.approval); setNotice('操作需要安全确认。'); }
-      else { setToolResults((current) => ({ ...current, [item.id]: response.result })); setNotice(response.result.summary); }
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { setConnectionBusy(undefined); }
+      const connection = await ensureConnected(item);
+      const session = await api.openTerminal(connection.id, { terminalType: 'xterm-256color', cols: 80, rows: 24, env: {} });
+      const tab: TerminalTab = { id: crypto.randomUUID(), serverId: item.id, title: `${item.name}`, sessionId: session.sessionId };
+      setTabs((current) => [...current, tab]);
+      setActiveTabId(tab.id);
+      setSelectedServerId(item.id);
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    finally { setBusyServerId(undefined); }
   };
 
-  const resolveApproval = async (decision: 'approve' | 'reject') => {
-    if (!pendingApproval) return;
-    const typedConfirmation = pendingApproval.requiredConfirmation === 'typeTarget' && decision === 'approve' ? window.prompt(`请输入目标以确认：${pendingApproval.targetLabel}`) ?? undefined : undefined;
+  const reopenTerminal = async (tabId: string) => {
+    const tab = tabs.find((item) => item.id === tabId);
+    const server = profiles.find((item) => item.id === tab?.serverId);
+    if (!server) return;
+    setTabs((current) => current.filter((item) => item.id !== tabId));
+    await openTerminalFor(server);
+  };
+
+  const closeTab = async (tabId: string) => {
+    const tab = tabs.find((item) => item.id === tabId);
+    if (tab?.sessionId) { try { await api.terminalClose(tab.sessionId); } catch { /* already gone */ } }
+    setTabs((current) => {
+      const next = current.filter((item) => item.id !== tabId);
+      if (activeTabId === tabId) setActiveTabId(next[next.length - 1]?.id);
+      return next;
+    });
+  };
+
+  // ------------------------------------------------------------------- tools
+
+  const runTool = async (command: ToolCommandMeta, service: string) => {
+    const server = selectedServer ?? connectedServers[0];
+    if (!server) { setBanner({ kind: 'error', text: '请先选择服务器。' }); return; }
+    setBusyServerId(server.id);
     try {
-      const response = await api.resolveApproval({ approvalId: pendingApproval.approvalId, requestHash: pendingApproval.requestHash, decision, typedConfirmation });
-      setPendingApproval(undefined);
-      if (response.kind === 'result') { setToolResults((current) => ({ ...current, approval: response.result })); setNotice(response.result.summary); }
-    } catch (cause) { setError(errorMessage(cause)); }
-  };
-
-  const restartService = async (item: ServerProfile) => {
-    const service = window.prompt('输入要重启的 systemd 服务名（例如 nginx）')?.trim();
-    if (!service) return;
-    await runTool(item, 'service.restart', { service }, { kind: 'service', serverId: item.id, service });
-  };
-
-  const runCheck = async (item: ServerProfile) => {
-    const connection = connections[item.id];
-    if (!connection) return;
-    setConnectionBusy(item.id);
-    try {
-      const result = await api.exec(connection.id, { command: "printf 'InfraDeck SSH OK\\n'", timeoutMs: 30000, env: {}, maxOutputBytes: 262144 });
-      setOutputs((current) => ({ ...current, [item.id]: result }));
-      setNotice(`SSH 测试命令已完成：${result.stdout.trim() || '无输出'}`);
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { setConnectionBusy(undefined); }
-  };
-
-  const saveAiSettings = async (event: FormEvent) => {
-    event.preventDefault();
-    setAiBusy(true); setError(undefined);
-    try {
-      const saved = await api.saveAiProviderSettings({
-        baseUrl: aiBaseUrl,
-        model: aiModel,
-        apiKey: aiApiKey.trim() || undefined,
-        maxToolIterations: aiMaxIterations,
+      const response = await api.executeTool({
+        id: crypto.randomUUID(),
+        name: command.toolName,
+        version: '1.0.0',
+        input: command.input,
+        target: buildTarget(command, server.id, service),
+        requestedAt: new Date().toISOString(),
       });
-      setAiSettings(saved);
-      setAiApiKey('');
-      setNotice('AI Provider 设置已保存，API Key 只存入系统凭据存储。');
-    } catch (cause) { setError(errorMessage(cause)); }
-    finally { setAiBusy(false); }
+      if (response.kind === 'approvalRequired') { setUserApproval(response.approval); notify('操作需要安全确认。'); }
+      else {
+        setLastToolResult(response.result);
+        notify(response.result.summary);
+      }
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    finally { setBusyServerId(undefined); }
   };
 
-  const sendAgentMessage = async () => {
-    if (!aiTarget || !aiInput.trim()) return;
-    setAiBusy(true); setError(undefined);
-    setAgentApproval(undefined);
+  const resolveUserApproval = async (decision: 'approve' | 'reject') => {
+    if (!userApproval) return;
+    const typedConfirmation = userApproval.requiredConfirmation === 'typeTarget' && decision === 'approve'
+      ? window.prompt(`请输入目标以确认：${userApproval.targetLabel}`) ?? undefined
+      : undefined;
     try {
-      const run = await api.agentSend({ serverId: aiTarget, message: aiInput.trim() });
+      const response = await api.resolveApproval({
+        approvalId: userApproval.approvalId, requestHash: userApproval.requestHash, decision, typedConfirmation,
+      });
+      setUserApproval(undefined);
+      if (response.kind === 'result') { setLastToolResult(response.result); notify(response.result.summary); }
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+  };
+
+  const resolveHostKey = async (decision: 'trustOnce' | 'trustAndSave' | 'reject') => {
+    if (!hostKeyPrompt) return;
+    try {
+      await api.hostKeyResolve({ ...hostKeyPrompt, decision });
+      const server = profiles.find((item) => item.id === hostKeyPrompt.serverId);
+      setHostKeyPrompt(undefined);
+      if (decision !== 'reject' && server) await connect(server);
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+  };
+
+  // ---------------------------------------------------------------------- AI
+
+  const sendAiMessage = async () => {
+    if (!selectedServerId || !aiInput.trim()) return;
+    setAiBusy(true);
+    setAiApproval(undefined);
+    try {
+      const run = await api.agentSend({ serverId: selectedServerId, message: aiInput.trim() });
       setAiRun(run);
-      if (run.status === 'waitingApproval' && run.pendingApproval) { setAgentApproval(run.pendingApproval); setNotice('AI 请求执行变更操作，需要安全确认。'); }
+      if (run.status === 'waitingApproval' && run.pendingApproval) notify('AI 请求执行变更操作，需要安全确认。');
+      if (run.pendingApproval) setAiApproval(run.pendingApproval);
       setAiInput('');
-    } catch (cause) { setError(errorMessage(cause)); }
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
     finally { setAiBusy(false); }
   };
 
-  const resolveAgentApproval = async (decision: 'approve' | 'reject') => {
-    if (!agentApproval || !aiRun) return;
-    const typedConfirmation = agentApproval.requiredConfirmation === 'typeTarget' && decision === 'approve' ? window.prompt(`请输入目标以确认：${agentApproval.targetLabel}`) ?? undefined : undefined;
+  const resolveAiApproval = async (decision: 'approve' | 'reject') => {
+    if (!aiApproval || !aiRun) return;
+    const typedConfirmation = aiApproval.requiredConfirmation === 'typeTarget' && decision === 'approve'
+      ? window.prompt(`请输入目标以确认：${aiApproval.targetLabel}`) ?? undefined
+      : undefined;
     setAiBusy(true);
     try {
-      const response = await api.resolveApproval({ approvalId: agentApproval.approvalId, requestHash: agentApproval.requestHash, decision, typedConfirmation });
-      setAgentApproval(undefined);
+      const response = await api.resolveApproval({
+        approvalId: aiApproval.approvalId, requestHash: aiApproval.requestHash, decision, typedConfirmation,
+      });
+      setAiApproval(undefined);
       if (response.kind === 'result') {
         const run = await api.agentResume(aiRun.runId, response.result);
         setAiRun(run);
-        if (run.status === 'waitingApproval' && run.pendingApproval) { setAgentApproval(run.pendingApproval); setNotice('AI 请求执行下一个变更操作，需要安全确认。'); }
+        if (run.pendingApproval) setAiApproval(run.pendingApproval);
       }
-    } catch (cause) { setError(errorMessage(cause)); }
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
     finally { setAiBusy(false); }
   };
 
-  const cancelAgentRun = async () => {
+  const cancelAiRun = async () => {
     if (!aiRun) return;
-    try { await api.agentCancel(aiRun.runId); setNotice('已请求取消当前 AI 运行。'); } catch (cause) { setError(errorMessage(cause)); }
+    try { await api.agentCancel(aiRun.runId); notify('已请求取消当前 AI 运行。'); }
+    catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
   };
 
-  const connectedServers = profiles.filter((item) => connections[item.id]?.state === 'connected');
-  const aiConfigured = Boolean(aiSettings?.apiKeyCredentialId);
+  // ----------------------------------------------------------------- palette
+
+  const paletteCommands = useMemo<PaletteCommand[]>(() => {
+    const base: PaletteCommand[] = [
+      { id: 'app.settings', title: '打开设置', group: '应用', run: () => setShowSettings(true) },
+      { id: 'app.server.add', title: '添加服务器', group: '应用', run: () => { setEditingProfile(undefined); setShowProfileForm(true); } },
+    ];
+    for (const server of profiles) {
+      base.push({
+        id: `server.connect.${server.id}`,
+        title: `连接 ${server.name}`,
+        group: '服务器',
+        keywords: `${server.host} ${server.username}`,
+        run: () => void connect(server),
+      });
+      base.push({
+        id: `server.terminal.${server.id}`,
+        title: `打开「${server.name}」终端`,
+        group: '终端',
+        keywords: `${server.host} terminal`,
+        run: () => void openTerminalFor(server),
+      });
+    }
+    return base;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profiles, connections]);
+
+  const paletteToolCommands = useMemo(
+    () => TOOL_COMMANDS.map((meta) => ({ meta, run: () => void runTool(meta, meta.targetKind === 'service' ? window.prompt('输入服务名')?.trim() ?? '' : '') })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedServerId, connectedServers.length],
+  );
 
   return (
-    <main className="shell">
+    <main className="workspace-shell">
       <header className="topbar">
-        <div>
+        <div className="topbar-left">
           <p className="eyebrow">AI-NATIVE INFRASTRUCTURE WORKSPACE</p>
           <h1>InfraDeck</h1>
         </div>
-        <div className={`health-pill ${health ? 'ready' : 'offline'}`}>
-          <span className="status-dot" />
-          {health ? '后端已就绪' : '连接后端中'}
+        <div className="topbar-actions">
+          <button className="small-button" onClick={() => setPaletteOpen(true)}>⌘K 命令面板</button>
+          <button className="small-button" onClick={() => setShowSettings(true)}>设置</button>
+          <div className={`health-pill ${health ? 'ready' : 'offline'}`}>
+            <span className="status-dot" />
+            {health ? '后端已就绪' : '连接后端中'}
+          </div>
         </div>
       </header>
 
-      <section className="hero">
-        <div>
-          <p className="eyebrow">PHASE 01 · ENGINEERING FOUNDATION</p>
-          <h2>先把基础设施工作空间稳稳搭起来。</h2>
-          <p className="hero-copy">当前阶段聚焦 IPC、结构化错误、持久化和可追踪的服务器配置，为后续 SSH、Tool 与 Policy 闭环提供稳定边界。</p>
-        </div>
-        <div className="health-card">
-          <span>系统状态</span>
-          <strong>{health?.status === 'ok' ? 'Operational' : '等待 Rust 后端'}</strong>
-          <small>{health ? `存储就绪 · ${new Date(health.timestamp).toLocaleString()}` : '启动 Tauri 后端以完成检查'}</small>
-        </div>
-      </section>
+      {banner && <div className={banner.kind === 'error' ? 'banner error' : 'banner success'} onClick={() => setBanner(undefined)}>{banner.text}</div>}
 
-      {(error || notice) && <div className={error ? 'banner error' : 'banner success'}>{error ?? notice}</div>}
-
-      {hostKeyPrompt && <section className="hostkey-card"><div><p className="eyebrow">HOST KEY VERIFICATION</p><h3>首次连接需要确认服务器指纹</h3><p>{hostKeyPrompt.host}:{hostKeyPrompt.port} · {hostKeyPrompt.algorithm}</p><code>{hostKeyPrompt.fingerprintSha256}</code></div><div className="hostkey-actions"><button className="small-button" onClick={() => void resolveHostKey('trustOnce')}>仅本次信任</button><button className="small-button connect" onClick={() => void resolveHostKey('trustAndSave')}>信任并保存</button><button className="small-button danger" onClick={() => void resolveHostKey('reject')}>拒绝</button></div></section>}
-      {pendingApproval && <section className="hostkey-card"><div><p className="eyebrow">APPROVAL REQUIRED · {pendingApproval.risk.level.toUpperCase()}</p><h3>{pendingApproval.summary}</h3><p>{pendingApproval.targetLabel}</p><small>{pendingApproval.impact.join('；')}</small></div><div className="hostkey-actions"><button className="small-button connect" onClick={() => void resolveApproval('approve')}>批准执行</button><button className="small-button danger" onClick={() => void resolveApproval('reject')}>拒绝</button></div></section>}
-
-      <section className="content-grid">
-        <form className="panel form-panel" onSubmit={submit}>
-          <div className="panel-heading">
-            <div><p className="eyebrow">SERVER PROFILE</p><h3>{editingProfileId ? '编辑服务器' : '添加服务器'}</h3></div>
-            <span className="step-badge">M0</span>
+      {hostKeyPrompt && (
+        <section className="hostkey-card">
+          <div>
+            <p className="eyebrow">HOST KEY VERIFICATION</p>
+            <h3>首次连接需要确认服务器指纹</h3>
+            <p>{hostKeyPrompt.host}:{hostKeyPrompt.port} · {hostKeyPrompt.algorithm}</p>
+            <code>{hostKeyPrompt.fingerprintSha256}</code>
           </div>
-          <label>显示名称<input required value={profile.name} onChange={(e) => update('name', e.target.value)} placeholder="Production API" /></label>
-          <div className="form-row">
-            <label>主机地址<input required value={profile.host} onChange={(e) => update('host', e.target.value)} placeholder="example.com" /></label>
-            <label>端口<input required type="number" min={1} max={65535} value={profile.port} onChange={(e) => update('port', Number(e.target.value))} /></label>
+          <div className="hostkey-actions">
+            <button className="small-button" onClick={() => void resolveHostKey('trustOnce')}>仅本次信任</button>
+            <button className="small-button connect" onClick={() => void resolveHostKey('trustAndSave')}>信任并保存</button>
+            <button className="small-button danger" onClick={() => void resolveHostKey('reject')}>拒绝</button>
           </div>
-          <div className="form-row">
-            <label>用户名<input required value={profile.username} onChange={(e) => update('username', e.target.value)} placeholder="ubuntu" /></label>
-            <label>环境<select value={profile.environment} onChange={(e) => update('environment', e.target.value as Environment)}><option value="unknown">未标记</option><option value="dev">开发</option><option value="staging">预发布</option><option value="production">生产</option></select></label>
-          </div>
-          <label>认证方式<select value={authKind} onChange={(e) => setAuthKind(e.target.value as AuthRef['kind'])}><option value="agent">SSH Agent</option><option value="password">密码</option><option value="privateKey">私钥</option></select></label>
-          {authKind === 'privateKey' && <label>私钥路径<input required value={keyPath} onChange={(e) => setKeyPath(e.target.value)} placeholder="~/.ssh/id_ed25519" /></label>}
-          {authKind !== 'agent' && <label>{authKind === 'password' ? 'SSH 密码' : '私钥口令（可选）'}<input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder={authKind === 'password' ? '只写入系统凭据存储' : '留空表示无口令'} /></label>}
-          <p className="form-note">认证信息只保存 credential reference；本阶段不会把密码或私钥写入 SQLite。编辑旧配置时必须重新输入密码并保存。</p>
-          <div className="form-actions"><button className="primary-button" type="submit" disabled={busy}>{busy ? '保存中…' : editingProfileId ? '更新 Server Profile' : '保存 Server Profile'}</button>{editingProfileId && <button className="small-button" type="button" onClick={cancelEdit}>取消编辑</button>}</div>
-        </form>
-
-        <section className="panel profiles-panel">
-          <div className="panel-heading"><div><p className="eyebrow">PERSISTED PROFILES</p><h3>服务器列表</h3></div><span className="count">{profiles.length}</span></div>
-          {profiles.length === 0 ? <div className="empty-state"><span>◎</span><p>还没有服务器配置</p><small>保存第一个 Profile，验证 SQLite 与 IPC 链路。</small></div> : <div className="profile-list">{profiles.map((item) => { const connection = connections[item.id]; const result = outputs[item.id]; const toolResult = toolResults[item.id]; const busyConnection = connectionBusy === item.id; const authLabel = item.auth.kind === 'agent' ? 'Agent' : item.auth.kind === 'password' ? '密码' : '私钥'; return <article className="profile-item" key={item.id}><div className="server-icon">⌁</div><div className="profile-main"><strong>{item.name}</strong><span>{item.username}@{item.host}:{item.port} · {authLabel}</span>{connection && <small className={`connection-state ${connection.state}`}>{connection.state === 'connected' ? '已连接' : connection.state}</small>}{result && <code className="exec-output">{result.stdout || result.stderr}</code>}{toolResult && <code className="exec-output">{toolResult.summary}</code>}</div><span className={`environment ${item.environment}`}>{item.environment}</span><div className="profile-actions"><button className="small-button" onClick={() => editProfile(item)}>编辑</button>{connection?.state === 'connected' ? <><button className="small-button" disabled={busyConnection} onClick={() => void runTool(item, 'system.memory', {})}>内存</button><button className="small-button" disabled={busyConnection} onClick={() => void runTool(item, 'system.disk', { path: '/' })}>磁盘</button><button className="small-button" disabled={busyConnection} onClick={() => void restartService(item)}>重启服务</button><button className="small-button" disabled={busyConnection} onClick={() => void runCheck(item)}>测试命令</button><button className="small-button" disabled={busyConnection} onClick={() => void reconnect(item)}>重连</button><button className="small-button danger" disabled={busyConnection} onClick={() => void disconnect(item)}>断开</button></> : <button className="small-button connect" disabled={busyConnection} onClick={() => void connect(item)}>{busyConnection ? '连接中…' : '连接'}</button>}</div></article>; })}</div>}
         </section>
-      </section>
-
-      <section className="content-grid" id="ai-panel">
-        <form className="panel form-panel" onSubmit={saveAiSettings}>
-          <div className="panel-heading">
-            <div><p className="eyebrow">AI PROVIDER · OPENAI-COMPATIBLE</p><h3>AI 设置</h3></div>
-            <span className="step-badge">M3</span>
+      )}
+      {userApproval && (
+        <section className="hostkey-card">
+          <div>
+            <p className="eyebrow">APPROVAL REQUIRED · {userApproval.risk.level.toUpperCase()}</p>
+            <h3>{userApproval.summary}</h3>
+            <p>{userApproval.targetLabel}</p>
+            <small>{userApproval.impact.join('；')}</small>
           </div>
-          <label>Base URL<input required value={aiBaseUrl} onChange={(e) => setAiBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" /></label>
-          <div className="form-row">
-            <label>模型<input required value={aiModel} onChange={(e) => setAiModel(e.target.value)} placeholder="gpt-4o-mini" /></label>
-            <label>最大工具迭代<input type="number" min={1} max={20} value={aiMaxIterations} onChange={(e) => setAiMaxIterations(Number(e.target.value))} /></label>
+          <div className="hostkey-actions">
+            <button className="small-button connect" onClick={() => void resolveUserApproval('approve')}>批准执行</button>
+            <button className="small-button danger" onClick={() => void resolveUserApproval('reject')}>拒绝</button>
           </div>
-          <label>API Key<input type="password" value={aiApiKey} onChange={(e) => setAiApiKey(e.target.value)} placeholder={aiConfigured ? '已保存（输入新值可覆盖）' : '只写入系统凭据存储'} /></label>
-          <p className="form-note">API Key 只保存 credential reference；AI 只能调用注册工具，变更操作必须经过人工审批并留审计记录。</p>
-          <div className="form-actions"><button className="primary-button" type="submit" disabled={aiBusy}>{aiBusy ? '保存中…' : '保存 AI 设置'}</button></div>
-        </form>
-
-        <section className="panel profiles-panel">
-          <div className="panel-heading"><div><p className="eyebrow">AI AGENT · DIAGNOSE → PROPOSE → EXECUTE → VERIFY</p><h3>AI 助手</h3></div><span className="count">{aiRun ? `#${aiRun.iterations}` : '∅'}</span></div>
-          {connectedServers.length === 0 ? <div className="empty-state"><span>◎</span><p>没有已连接的服务器</p><small>AI 助手作用于已连接的服务器，请先在右侧连接。</small></div> : <>
-            <div className="form-row">
-              <label>目标服务器<select value={aiTarget} onChange={(e) => setAiTarget(e.target.value)}><option value="">选择服务器…</option>{connectedServers.map((item) => <option key={item.id} value={item.id}>{item.name}（{item.environment}）</option>)}</select></label>
-              {aiRun && aiRun.status === 'waitingApproval' && <button className="small-button danger" type="button" onClick={() => void cancelAgentRun()}>取消运行</button>}
-            </div>
-            {aiRun && <div className="ai-run">
-              {aiRun.steps.map((step) => <div className="ai-step" key={step.toolCallId}><code className={`ai-step-status ${step.status}`}>{step.status}</code><strong>{step.name}</strong><span>{step.summary}</span></div>)}
-              {aiRun.finalText && <p className="ai-final">{aiRun.finalText}</p>}
-              {aiRun.error && <p className="banner error">{aiRun.error.code}: {aiRun.error.message}</p>}
-            </div>}
-            {agentApproval && <section className="hostkey-card"><div><p className="eyebrow">AI PROPOSAL · {agentApproval.risk.level.toUpperCase()}</p><h3>{agentApproval.summary}</h3><p>{agentApproval.targetLabel}</p><small>{agentApproval.impact.join('；')}</small></div><div className="hostkey-actions"><button className="small-button connect" onClick={() => void resolveAgentApproval('approve')}>批准执行</button><button className="small-button danger" onClick={() => void resolveAgentApproval('reject')}>拒绝</button></div></section>}
-            <div className="form-row">
-              <input value={aiInput} onChange={(e) => setAiInput(e.target.value)} placeholder="例如：帮我看看内存为什么这么高" disabled={aiBusy || !aiTarget} onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); void sendAgentMessage(); } }} />
-              <button className="primary-button" type="button" disabled={aiBusy || !aiTarget || !aiInput.trim()} onClick={() => void sendAgentMessage()}>{aiBusy ? 'AI 运行中…' : '发送'}</button>
-            </div>
-          </>}
         </section>
-      </section>
+      )}
 
-      <footer><span>InfraDeck v0.1 · M3 AI Loop</span><button className="text-button" onClick={() => void refresh()}>重新检查</button></footer>
+      <div className="workspace-grid">
+        <ServerSidebar
+          profiles={profiles}
+          connections={connections}
+          activeServerId={selectedServerId}
+          busyServerId={busyServerId}
+          onSelect={(item) => { setSelectedServerId(item.id); if (connections[item.id]?.state === 'connected') void openTerminalFor(item); }}
+          onConnect={(item) => void connect(item)}
+          onDisconnect={(item) => void disconnect(item)}
+          onReconnect={(item) => void reconnect(item)}
+          onEdit={(item) => { setEditingProfile(item); setShowProfileForm(true); }}
+          onAdd={() => { setEditingProfile(undefined); setShowProfileForm(true); }}
+        />
+
+        <section className="workspace-main">
+          <QuickActions server={selectedServer ?? connectedServers[0]} busy={busyServerId !== undefined} onRun={(command, service) => void runTool(command, service)} />
+          {lastToolResult && <code className="exec-output tool-last">{lastToolResult.summary}</code>}
+          <TerminalTabs
+            tabs={tabs}
+            activeTabId={activeTabId}
+            profiles={profiles}
+            onSelect={setActiveTabId}
+            onClose={(tabId) => void closeTab(tabId)}
+            onRename={(tabId, title) => setTabs((current) => current.map((tab) => (tab.id === tabId ? { ...tab, title } : tab)))}
+            onReconnect={(tabId) => void reopenTerminal(tabId)}
+            onOpenTerminal={(server) => void openTerminalFor(server)}
+          />
+        </section>
+
+        <AiPanel
+          servers={profiles}
+          targetServerId={selectedServerId}
+          run={aiRun}
+          approval={aiApproval}
+          busy={aiBusy}
+          input={aiInput}
+          aiConfigured={Boolean(aiProvider?.apiKeyCredentialId)}
+          onTargetChange={setSelectedServerId}
+          onInput={setAiInput}
+          onSend={() => void sendAiMessage()}
+          onResolveApproval={(decision) => void resolveAiApproval(decision)}
+          onCancel={() => void cancelAiRun()}
+          onOpenSettings={() => setShowSettings(true)}
+        />
+      </div>
+
+      <footer>
+        <span>InfraDeck v0.1 · M5 V1 UX</span>
+        <button className="text-button" onClick={() => void refresh()}>重新检查</button>
+      </footer>
+
+      {(showProfileForm || editingProfile) && (
+        <ProfileForm
+          editing={editingProfile}
+          onClose={() => { setShowProfileForm(false); setEditingProfile(undefined); }}
+          onSaved={(saved) => setProfiles((current) => [saved, ...current.filter((item) => item.id !== saved.id)])}
+          onNotify={notify}
+          onError={(text) => setBanner({ kind: 'error', text })}
+        />
+      )}
+      {showSettings && (
+        <SettingsDialog
+          provider={aiProvider}
+          onClose={() => setShowSettings(false)}
+          onNotify={notify}
+          onSettingsChanged={(settings, provider) => { setAppSettings(settings); if (provider) setAiProvider(provider); }}
+        />
+      )}
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={paletteCommands}
+        toolCommands={paletteToolCommands}
+      />
     </main>
   );
 }

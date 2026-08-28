@@ -94,6 +94,11 @@ export interface ExecResult {
   signal?: string;
 }
 
+export interface TerminalReadDto { dataBase64: string; closed: boolean }
+
+export type PermissionMode = 'askOnly' | 'readOnly' | 'confirmChanges' | 'advanced' | 'restricted';
+export interface AppSettings { version: number; permissionMode: PermissionMode; telemetryEnabled: boolean; conversationPersistence: boolean }
+
 export type HostKeyStatus = 'unknown' | 'changed' | 'matched';
 export interface HostKeyCheckDto {
   host: string;
