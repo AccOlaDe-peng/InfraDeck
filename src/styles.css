@@ -227,3 +227,17 @@ footer { margin-top: 22px; color: var(--text-dim); font-size: 11px; }.text-butto
 .ai-context-select { display: flex; align-items: center; gap: 7px; }
 .ai-context-label { color: var(--text-dim); font-size: 10px; font-weight: 700; }
 .ai-context-select select { flex: 1; margin: 0; padding: 6px 8px; font-size: 11px; }
+
+/* Workspace tabs: fixed views mixed with terminal tabs */
+.tab-view { color: var(--text-dim); }
+.tab-view.active { color: var(--text); }
+
+/* Settings as a workspace tab */
+.settings-view { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px; flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: 12px; padding: 14px; background: var(--bg-panel); overflow: hidden; }
+.settings-nav { display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--border); padding-right: 10px; }
+.settings-nav .group-label { margin: 0 0 8px; }
+.settings-nav-item { border: 0; border-radius: 6px; padding: 7px 10px; color: var(--text-mid); background: transparent; font-size: 12px; text-align: left; }
+.settings-nav-item:hover { background: var(--bg-hover); color: var(--text); }
+.settings-nav-item.active { background: var(--bg-hover); color: var(--text); font-weight: 600; }
+.settings-content { overflow-y: auto; padding: 2px 6px; }
+.settings-content h3 { margin-bottom: 14px; font-size: 15px; }

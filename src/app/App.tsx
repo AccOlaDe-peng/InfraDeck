@@ -12,7 +12,8 @@ import TerminalTabs, { type TerminalTab } from './components/TerminalTabs';
 import AiPanel from './components/AiPanel';
 import TopBar from './components/TopBar';
 import QuickActions from './components/QuickActions';
-import SettingsDialog from './components/SettingsDialog';
+import SettingsView from './components/SettingsView';
+import WorkspaceTabs, { type WorkspacePane, type WorkspaceView } from './components/WorkspaceTabs';
 import CommandPalette, { type PaletteCommand } from './components/CommandPalette';
 import ProfileForm from './components/ProfileForm';
 import AuditDrawer from './components/AuditDrawer';
@@ -41,7 +42,8 @@ export default function App() {
 
   const [tabs, setTabs] = useState<TerminalTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string>();
-  const [mainView, setMainView] = useState<'terminal' | 'files' | 'containers'>('terminal');
+  const [openViews, setOpenViews] = useState<WorkspaceView[]>([]);
+  const [activePane, setActivePane] = useState<WorkspacePane>();
   const [aiCollapsed, setAiCollapsed] = useState(() => localStorage.getItem('infradeck.aiCollapsed') === '1');
 
   // Theme preference is device-local; `system` keeps following the OS live.
@@ -50,6 +52,22 @@ export default function App() {
   const toggleAiPanel = (collapsed: boolean) => {
     setAiCollapsed(collapsed);
     localStorage.setItem('infradeck.aiCollapsed', collapsed ? '1' : '0');
+  };
+
+  const openView = (view: WorkspaceView) => {
+    setOpenViews((current) => (current.includes(view) ? current : [...current, view]));
+    setActivePane({ kind: view });
+  };
+  const closeView = (view: WorkspaceView) => {
+    setOpenViews((current) => current.filter((item) => item !== view));
+    setActivePane((current) => {
+      if (current?.kind !== view) return current;
+      return openViews.includes('files') && view !== 'files' ? { kind: 'files' }
+        : openViews.includes('containers') && view !== 'containers' ? { kind: 'containers' }
+        : openViews.includes('settings') && view !== 'settings' ? { kind: 'settings' }
+        : activeTabId ? { kind: 'terminal', id: activeTabId }
+        : undefined;
+    });
   };
 
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string }>();
@@ -68,7 +86,6 @@ export default function App() {
 
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [editingProfile, setEditingProfile] = useState<ServerProfile>();
-  const [showSettings, setShowSettings] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [aiConversations, setAiConversations] = useState<AiConversation[]>([]);
   const [aiConversationId, setAiConversationId] = useState<string>();
@@ -219,7 +236,9 @@ export default function App() {
 
   const openTerminalFor = async (item: ServerProfile) => {
     if (tabs.some((tab) => tab.serverId === item.id && !tab.closed)) {
-      setActiveTabId(tabs.find((tab) => tab.serverId === item.id)?.id);
+      const existing = tabs.find((tab) => tab.serverId === item.id)?.id;
+      setActiveTabId(existing);
+      if (existing) setActivePane({ kind: 'terminal', id: existing });
       return;
     }
     setBusyServerId(item.id);
@@ -229,6 +248,7 @@ export default function App() {
       const tab: TerminalTab = { id: crypto.randomUUID(), serverId: item.id, title: `${item.name}`, sessionId: session.sessionId };
       setTabs((current) => [...current, tab]);
       setActiveTabId(tab.id);
+      setActivePane({ kind: 'terminal', id: tab.id });
       setSelectedServerId(item.id);
     } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
     finally { setBusyServerId(undefined); }
@@ -247,7 +267,15 @@ export default function App() {
     if (tab?.sessionId) { try { await api.terminalClose(tab.sessionId); } catch { /* already gone */ } }
     setTabs((current) => {
       const next = current.filter((item) => item.id !== tabId);
-      if (activeTabId === tabId) setActiveTabId(next[next.length - 1]?.id);
+      if (activeTabId === tabId) {
+        setActiveTabId(next[next.length - 1]?.id);
+        setActivePane((pane) => {
+          if (pane?.kind !== 'terminal' || pane.id !== tabId) return pane;
+          const fallback = next[next.length - 1]?.id;
+          if (fallback) return { kind: 'terminal', id: fallback };
+          return openViews[0] ? { kind: openViews[0] } : undefined;
+        });
+      }
       return next;
     });
   };
@@ -384,7 +412,7 @@ export default function App() {
 
   const paletteCommands = useMemo<PaletteCommand[]>(() => {
     const base: PaletteCommand[] = [
-      { id: 'app.settings', title: '打开设置', group: '应用', run: () => setShowSettings(true) },
+      { id: 'app.settings', title: '打开设置', group: '应用', run: () => openView('settings') },
       { id: 'app.server.add', title: '添加服务器', group: '应用', run: () => { setEditingProfile(undefined); setShowProfileForm(true); } },
     ];
     for (const server of profiles) {
@@ -417,14 +445,14 @@ export default function App() {
     <main className="workspace-shell">
       <TopBar
         healthReady={Boolean(health)}
-        mainView={mainView}
+        activeView={activePane?.kind === 'terminal' ? undefined : activePane?.kind}
         connected={Boolean((selectedServer ?? connectedServers[0]) && connections[(selectedServer ?? connectedServers[0]).id]?.state === 'connected')}
-        onView={setMainView}
-        onOpenTerminal={() => { const target = selectedServer ?? connectedServers[0]; if (target) { setMainView('terminal'); void openTerminalFor(target); } }}
+        onView={(view) => openView(view)}
+        onOpenTerminal={() => { const target = selectedServer ?? connectedServers[0]; if (target) void openTerminalFor(target); }}
         onAddServer={() => { setEditingProfile(undefined); setShowProfileForm(true); }}
         onPalette={() => setPaletteOpen(true)}
         onAudit={() => setShowAudit(true)}
-        onSettings={() => setShowSettings(true)}
+        onSettings={() => openView('settings')}
       />
 
       {banner && <div className={banner.kind === 'error' ? 'banner error' : 'banner success'} onClick={() => setBanner(undefined)}>{banner.text}</div>}
@@ -463,48 +491,59 @@ export default function App() {
         <section className="workspace-main">
           <QuickActions server={selectedServer ?? connectedServers[0]} connectedCount={connectedServers.length} busy={busyServerId !== undefined} onRun={(command, service, batchMode) => void runTool(command, service, batchMode)} />
           {lastToolResult && <code className="exec-output tool-last">{lastToolResult.summary}</code>}
-          <div className="view-switch">
-            <button className={`tiny-button ${mainView === 'terminal' ? 'active' : ''}`} onClick={() => setMainView('terminal')}>终端</button>
-            <button
-              className={`tiny-button ${mainView === 'files' ? 'active' : ''}`}
-              disabled={mainView !== 'files' && !(() => { const active = selectedServer ?? connectedServers[0]; return Boolean(active && connections[active.id]?.state === 'connected'); })()}
-              onClick={() => setMainView('files')}
-            >文件</button>
-            <button
-              className={`tiny-button ${mainView === 'containers' ? 'active' : ''}`}
-              disabled={mainView !== 'containers' && !(() => { const active = selectedServer ?? connectedServers[0]; return Boolean(active && connections[active.id]?.state === 'connected'); })()}
-              onClick={() => setMainView('containers')}
-            >容器</button>
-          </div>
-          {(() => { const active = selectedServer ?? connectedServers[0]; const connected = active && connections[active.id]?.state === 'connected';
-          return mainView === 'files' && connected ? (
-            <FilesView
-              server={selectedServer ?? connectedServers[0]}
-              connection={connections[(selectedServer ?? connectedServers[0]).id]}
-              peers={connectedServers
-                .filter((item) => item.id !== (selectedServer ?? connectedServers[0]).id)
-                .map((item) => ({ server: item, connection: connections[item.id] }))}
-              onNotify={notify}
-              onError={(text) => setBanner({ kind: 'error', text })}
-            />
-          ) : mainView === 'containers' && connected ? (
-            <ContainerListView
-              server={selectedServer ?? connectedServers[0]}
-              connection={connections[(selectedServer ?? connectedServers[0]).id]}
-              busy={busyServerId !== undefined}
-              onRunCommand={(command, containerId) => void runTool(command, containerId)}
-              onError={(text) => setBanner({ kind: 'error', text })}
-            />
-          ) : (
+          <WorkspaceTabs
+            tabs={tabs}
+            activePane={activePane}
+            profiles={profiles}
+            onSelectTerminal={(tabId) => { setActiveTabId(tabId); setActivePane({ kind: 'terminal', id: tabId }); }}
+            onCloseTerminal={(tabId) => void closeTab(tabId)}
+            onRenameTerminal={(tabId, title) => setTabs((current) => current.map((tab) => (tab.id === tabId ? { ...tab, title } : tab)))}
+            onReconnectTerminal={(tabId) => void reopenTerminal(tabId)}
+            onOpenTerminal={(server) => void openTerminalFor(server)}
+            onOpenView={openView}
+            onCloseView={closeView}
+          />
+          {(() => { const active = selectedServer ?? connectedServers[0]; const connected = Boolean(active && connections[active.id]?.state === 'connected');
+          if (activePane?.kind === 'settings') {
+            return (
+              <SettingsView
+                provider={aiProvider}
+                onNotify={notify}
+                onSettingsChanged={(settings, provider) => { setAppSettings(settings); if (provider) setAiProvider(provider); }}
+                onError={(text) => setBanner({ kind: 'error', text })}
+              />
+            );
+          }
+          if (activePane?.kind === 'files') {
+            return connected ? (
+              <FilesView
+                server={selectedServer ?? connectedServers[0]}
+                connection={connections[(selectedServer ?? connectedServers[0]).id]}
+                peers={connectedServers
+                  .filter((item) => item.id !== (selectedServer ?? connectedServers[0]).id)
+                  .map((item) => ({ server: item, connection: connections[item.id] }))}
+                onNotify={notify}
+                onError={(text) => setBanner({ kind: 'error', text })}
+              />
+            ) : <div className="terminal-placeholder">文件视图需要先连接服务器。</div>;
+          }
+          if (activePane?.kind === 'containers') {
+            return connected ? (
+              <ContainerListView
+                server={selectedServer ?? connectedServers[0]}
+                connection={connections[(selectedServer ?? connectedServers[0]).id]}
+                busy={busyServerId !== undefined}
+                onRunCommand={(command, containerId) => void runTool(command, containerId)}
+                onError={(text) => setBanner({ kind: 'error', text })}
+              />
+            ) : <div className="terminal-placeholder">容器视图需要先连接服务器。</div>;
+          }
+          return (
             <TerminalTabs
               tabs={tabs}
-              activeTabId={activeTabId}
+              activeTabId={activePane?.kind === 'terminal' ? activePane.id : activeTabId}
               profiles={profiles}
-              onSelect={setActiveTabId}
               onClose={(tabId) => void closeTab(tabId)}
-              onRename={(tabId, title) => setTabs((current) => current.map((tab) => (tab.id === tabId ? { ...tab, title } : tab)))}
-              onReconnect={(tabId) => void reopenTerminal(tabId)}
-              onOpenTerminal={(server) => void openTerminalFor(server)}
             />
           ); })()}
         </section>
@@ -542,7 +581,7 @@ export default function App() {
           onResolveApproval={(decision) => void resolveAiApproval(decision)}
           onResolveUserApproval={(decision) => void resolveUserApproval(decision)}
           onCancel={() => void cancelAiRun()}
-          onOpenSettings={() => setShowSettings(true)}
+          onOpenSettings={() => openView('settings')}
         />
         )}
       </div>
@@ -560,14 +599,6 @@ export default function App() {
           onSaved={(saved) => setProfiles((current) => [saved, ...current.filter((item) => item.id !== saved.id)])}
           onNotify={notify}
           onError={(text) => setBanner({ kind: 'error', text })}
-        />
-      )}
-      {showSettings && (
-        <SettingsDialog
-          provider={aiProvider}
-          onClose={() => setShowSettings(false)}
-          onNotify={notify}
-          onSettingsChanged={(settings, provider) => { setAppSettings(settings); if (provider) setAiProvider(provider); }}
         />
       )}
       <CommandPalette

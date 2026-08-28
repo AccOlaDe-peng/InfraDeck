@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 
 interface Props {
   healthReady: boolean;
-  mainView: 'terminal' | 'files' | 'containers';
+  /** Currently active workspace pane when it is a view (files/containers/settings). */
+  activeView?: 'files' | 'containers' | 'settings';
   connected: boolean;
-  onView: (view: 'terminal' | 'files' | 'containers') => void;
+  onView: (view: 'files' | 'containers') => void;
   onOpenTerminal: () => void;
   onAddServer: () => void;
   onPalette: () => void;
@@ -14,7 +15,7 @@ interface Props {
 
 /**
  * dbx-style global action bar: icon+label buttons for creation/navigation,
- * low-frequency items folded into「更多」. Nothing resource-scoped lives here.
+ * low-frequency items folded into「更多」. Views open as workspace tabs.
  */
 export default function TopBar(props: Props) {
   const [moreOpen, setMoreOpen] = useState(false);
@@ -39,12 +40,12 @@ export default function TopBar(props: Props) {
         <button className="topbar-btn" onClick={props.onAddServer}><span className="topbar-icon">＋</span>新建连接</button>
         <button className="topbar-btn" disabled={!props.connected} onClick={props.onOpenTerminal}><span className="topbar-icon">▶</span>打开终端</button>
         <button
-          className={`topbar-btn ${props.mainView === 'files' ? 'active' : ''}`}
+          className={`topbar-btn ${props.activeView === 'files' ? 'active' : ''}`}
           disabled={!props.connected}
           onClick={() => props.onView('files')}
         ><span className="topbar-icon">▤</span>文件</button>
         <button
-          className={`topbar-btn ${props.mainView === 'containers' ? 'active' : ''}`}
+          className={`topbar-btn ${props.activeView === 'containers' ? 'active' : ''}`}
           disabled={!props.connected}
           onClick={() => props.onView('containers')}
         ><span className="topbar-icon">📦</span>容器</button>
