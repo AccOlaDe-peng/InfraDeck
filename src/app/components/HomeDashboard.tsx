@@ -13,7 +13,7 @@ interface Props {
 
 export default function HomeDashboard(props: Props) {
   const connected = props.profiles.filter((item) => props.connections[item.id]?.state === 'connected');
-  const environmentCount = new Set(props.profiles.map((item) => item.environment)).size;
+  const authCount = new Set(props.profiles.map((item) => item.auth.kind)).size;
   const recent = props.profiles.slice(0, 4);
 
   return (
@@ -31,7 +31,7 @@ export default function HomeDashboard(props: Props) {
         <div className="home-metrics">
           <article><span className="metric-icon">▤</span><div><small>服务器</small><strong>{props.profiles.length}</strong></div></article>
           <article><span className="metric-icon online">●</span><div><small>在线连接</small><strong>{connected.length}</strong></div></article>
-          <article><span className="metric-icon">◇</span><div><small>环境</small><strong>{environmentCount}</strong></div></article>
+          <article><span className="metric-icon">◇</span><div><small>认证方式</small><strong>{authCount}</strong></div></article>
         </div>
 
         <div className="home-content-grid">
@@ -52,7 +52,6 @@ export default function HomeDashboard(props: Props) {
                     <button key={server.id} className="recent-server" onClick={() => isConnected ? props.onOpenTerminal(server) : props.onConnect(server)}>
                       <i className={`server-dot ${isConnected ? 'online' : ''}`} />
                       <span><strong>{server.name}</strong><small>{server.username}@{server.host}</small></span>
-                      <em className={`environment ${server.environment}`}>{server.environment}</em>
                       <b>{isConnected ? '打开终端' : '连接'} →</b>
                     </button>
                   );

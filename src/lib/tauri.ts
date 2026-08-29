@@ -34,8 +34,11 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export const api = {
   healthCheck: () => call<HealthCheckDto>('health_check'),
   listServerProfiles: () => call<ServerProfile[]>('server_profiles_list'),
+  deleteServerProfile: (serverId: string) => call<boolean>('server_profile_delete', { serverId }),
   saveServerProfile: (profile: ServerProfileInput) =>
     call<ServerProfile>('server_profile_save', { input: profile }),
+  testServerConnection: (input: { profile: ServerProfileInput; secret?: string }) =>
+    call<{ reachable: boolean; remoteAddress?: string; serverVersion?: string; authenticatedBy?: string }>('server_connection_test', { input }),
   setCredential: (credentialId: string | undefined, secret: string) =>
     call<{ credentialId: string; exists: boolean }>('credential_set', { input: { credentialId, secret } }),
   deleteCredential: (credentialId: string) =>

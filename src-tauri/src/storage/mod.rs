@@ -123,6 +123,10 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
+    pub fn delete_server_profile(&self, server_id: &str) -> Result<bool, AppError> {
+        Ok(self.conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id])? > 0)
+    }
+
     pub fn known_host_fingerprint(
         &self,
         host: &str,

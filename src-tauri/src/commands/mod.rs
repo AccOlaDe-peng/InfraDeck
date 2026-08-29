@@ -1031,6 +1031,70 @@ pub fn server_profile_save(
     Ok(profile)
 }
 
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::storage")]
+pub fn server_profile_delete(state: State<'_, AppState>, server_id: String) -> Result<bool, AppError> {
+    let db = state.db.lock().map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+    db.delete_server_profile(&server_id)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerConnectionTestInput {
+    pub profile: ServerProfileInput,
+    pub secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerConnectionTestResult {
+    pub reachable: bool,
+    pub remote_address: Option<String>,
+    pub server_version: Option<String>,
+    pub authenticated_by: Option<String>,
+}
+
+#[tauri::command]
+#[instrument(skip(state, input), target = "infradeck::ssh")]
+pub async fn server_connection_test(
+    state: State<'_, AppState>,
+    input: ServerConnectionTestInput,
+) -> Result<ServerConnectionTestResult, AppError> {
+    let now = Utc::now().to_rfc3339();
+    let profile = ServerProfile {
+        id: Uuid::new_v4().to_string(),
+        name: input.profile.name,
+        host: input.profile.host,
+        port: input.profile.port.unwrap_or(22),
+        username: input.profile.username,
+        auth: input.profile.auth,
+        environment: input.profile.environment.unwrap_or(crate::models::Environment::Unknown),
+        tags: input.profile.tags.unwrap_or_default(),
+        connect_timeout_ms: input.profile.connect_timeout_ms.unwrap_or(15_000),
+        keep_alive_interval_sec: input.profile.keep_alive_interval_sec.unwrap_or(30),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    validate_profile(&profile)?;
+    let credential = match (&profile.auth, input.secret) {
+        (crate::models::AuthRef::Password { .. }, Some(value))
+        | (crate::models::AuthRef::PrivateKey { .. }, Some(value)) if !value.is_empty() => {
+            Some(SecretValue::new(value).map_err(AppError::from)?)
+        }
+        (crate::models::AuthRef::Password { credential_id }, None) => Some(state.credentials.get(credential_id)?),
+        _ => None,
+    };
+    let connection = state.ssh.connect(&profile, credential.as_ref()).await.map_err(AppError::from)?;
+    let result = ServerConnectionTestResult {
+        reachable: connection.state == crate::ssh::ConnectionState::Connected,
+        remote_address: connection.remote_address.clone(),
+        server_version: connection.server_version.clone(),
+        authenticated_by: connection.authenticated_by.clone(),
+    };
+    state.ssh.disconnect(&connection.id).await.map_err(AppError::from)?;
+    Ok(result)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialSetInput {

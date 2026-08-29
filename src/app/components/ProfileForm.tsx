@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react';
-import type { AuthRef, Environment, ServerProfile, ServerProfileInput } from '../../types/contracts';
+import type { AuthRef, ServerProfile, ServerProfileInput } from '../../types/contracts';
 import { api, AppError } from '../../lib/tauri';
 
 interface Props {
@@ -35,6 +35,8 @@ export default function ProfileForm({ editing, onClose, onSaved, onNotify, onErr
   const [secret, setSecret] = useState('');
   const [keyPath, setKeyPath] = useState(editing?.auth.kind === 'privateKey' ? editing.auth.keyPath : '');
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string }>();
 
   const update = <K extends keyof ServerProfileInput>(key: K, value: ServerProfileInput[K]) =>
     setProfile((current) => ({ ...current, [key]: value }));
@@ -71,6 +73,46 @@ export default function ProfileForm({ editing, onClose, onSaved, onNotify, onErr
     }
   };
 
+  const testConnection = async () => {
+    setTestResult(undefined);
+    if (!profile.host.trim() || !profile.username.trim()) {
+      setTestResult({ ok: false, text: '请填写主机地址和用户名' });
+      return;
+    }
+    let auth: AuthRef = { kind: 'agent' };
+    if (authKind === 'password') {
+      const credentialId = profile.auth.kind === 'password' ? profile.auth.credentialId : crypto.randomUUID();
+      if (!secret && profile.auth.kind !== 'password') {
+        setTestResult({ ok: false, text: '请输入 SSH 密码' });
+        return;
+      }
+      auth = { kind: 'password', credentialId };
+    } else if (authKind === 'privateKey') {
+      if (!keyPath.trim()) {
+        setTestResult({ ok: false, text: '请输入私钥路径' });
+        return;
+      }
+      auth = { kind: 'privateKey', keyPath: keyPath.trim() };
+    }
+    setTesting(true);
+    try {
+      const result = await api.testServerConnection({
+        profile: { ...profile, name: profile.name.trim() || '连接测试', host: profile.host.trim(), username: profile.username.trim(), port: Number(profile.port), auth },
+        ...(secret ? { secret } : {}),
+      });
+      setTestResult({
+        ok: result.reachable,
+        text: result.reachable
+          ? `连接成功${result.serverVersion ? ` · ${result.serverVersion}` : ''}`
+          : '目标不可达',
+      });
+    } catch (cause) {
+      setTestResult({ ok: false, text: cause instanceof AppError ? cause.message : cause instanceof Error ? cause.message : String(cause) });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   return (
     <div className="modal-backdrop connection-form-backdrop" onClick={onClose}>
       <form className="connection-form connection-form-single" onClick={(event) => event.stopPropagation()} onSubmit={submit}>
@@ -96,10 +138,7 @@ export default function ProfileForm({ editing, onClose, onSaved, onNotify, onErr
                   <label>主机地址<input required value={profile.host} onChange={(event) => update('host', event.target.value)} placeholder="192.168.1.10 或 server.example.com" /></label>
                   <label>端口<input required type="number" min={1} max={65535} value={profile.port} onChange={(event) => update('port', Number(event.target.value))} /></label>
                 </div>
-                <div className="form-row">
-                  <label>用户名<input required value={profile.username} onChange={(event) => update('username', event.target.value)} placeholder="root" /></label>
-                  <label>环境<select value={profile.environment} onChange={(event) => update('environment', event.target.value as Environment)}><option value="unknown">未标记</option><option value="dev">开发</option><option value="staging">预发布</option><option value="production">生产</option></select></label>
-                </div>
+                <label className="connection-username">用户名<input required value={profile.username} onChange={(event) => update('username', event.target.value)} placeholder="root" /></label>
               </section>
             )}
 
@@ -136,8 +175,8 @@ export default function ProfileForm({ editing, onClose, onSaved, onNotify, onErr
         </div>
 
         <footer className="connection-form-footer">
-          <span><i /> 配置保存在本机</span>
-          <div><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="secondary-button test-connection-button" onClick={() => { if (!profile.host.trim() || !profile.username.trim()) { setSection('basic'); onError('请先填写主机地址和用户名。'); return; } onNotify('连接参数检查通过；保存后将使用当前配置建立 SSH 连接。'); }}>测试连接</button><button className="primary-button" type="submit" disabled={busy}>{busy ? '保存中…' : editing ? '保存更改' : '保存连接'}</button></div>
+          <span className={`connection-test-result ${testResult ? (testResult.ok ? 'success' : 'failed') : ''}`}><i />{testResult?.text ?? '配置保存在本机'}</span>
+          <div><button type="button" className="secondary-button" onClick={onClose}>取消</button><button type="button" className="secondary-button test-connection-button" disabled={testing || busy} onClick={() => void testConnection()}>{testing ? '测试中…' : '测试连接'}</button><button className="primary-button" type="submit" disabled={busy || testing}>{busy ? '保存中…' : editing ? '保存更改' : '保存连接'}</button></div>
         </footer>
       </form>
     </div>

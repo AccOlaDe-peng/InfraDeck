@@ -37,7 +37,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::health_check,
             commands::server_profiles_list,
+            commands::server_profile_delete,
             commands::server_profile_save,
+            commands::server_connection_test,
             commands::server_connect,
             commands::server_reconnect,
             commands::connection_disconnect,

@@ -1,6 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ConnectionDto, ServerProfile } from '../../types/contracts';
-import { ENVIRONMENT_LABELS, ENVIRONMENT_ORDER } from '../../lib/commandMeta';
 
 interface Props {
   profiles: ServerProfile[];
@@ -8,116 +7,96 @@ interface Props {
   activeServerId?: string;
   busyServerId?: string;
   onSelect: (server: ServerProfile) => void;
-  onConnect: (server: ServerProfile) => void;
+  onOpenTerminal: (server: ServerProfile) => void;
+  onOpenFiles: (server: ServerProfile) => void;
+  onOpenMonitoring: (server: ServerProfile) => void;
   onDisconnect: (server: ServerProfile) => void;
   onReconnect: (server: ServerProfile) => void;
   onEdit: (server: ServerProfile) => void;
+  onDuplicate: (server: ServerProfile) => void;
+  onDelete: (server: ServerProfile) => void;
   onAdd: () => void;
+  onRefresh: () => void;
 }
 
-function statusLabel(connection?: ConnectionDto): { text: string; className: string } {
-  if (!connection) return { text: '未连接', className: 'status-disconnected' };
-  if (connection.state === 'connected') return { text: '已连接', className: 'status-connected' };
-  return { text: connection.state, className: 'status-other' };
-}
+interface MenuState { server: ServerProfile; x: number; y: number; }
 
-/** Left rail: environment grouping, search, per-server status and actions. */
 export default function ServerSidebar(props: Props) {
   const [query, setQuery] = useState('');
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [compact, setCompact] = useState(true);
-
-  const groups = useMemo(() => {
+  const [menu, setMenu] = useState<MenuState>();
+  const menuRef = useRef<HTMLDivElement>(null);
+  const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const filtered = props.profiles.filter((item) =>
-      !needle
-      || item.name.toLowerCase().includes(needle)
-      || item.host.toLowerCase().includes(needle)
-      || item.username.toLowerCase().includes(needle)
-      || item.tags.some((tag) => tag.toLowerCase().includes(needle)),
-    );
-    return ENVIRONMENT_ORDER.map((environment) => ({
-      environment,
-      items: filtered.filter((item) => item.environment === environment),
-    })).filter((group) => group.items.length > 0);
+    return props.profiles.filter((item) => !needle || [item.name, item.host, item.username, ...item.tags].some((value) => value.toLowerCase().includes(needle)));
   }, [props.profiles, query]);
 
-  const toggleGroup = (environment: string) => {
-    setCollapsed((current) => {
-      const next = new Set(current);
-      if (next.has(environment)) next.delete(environment); else next.add(environment);
-      return next;
-    });
-  };
-  const allCollapsed = groups.length > 0 && groups.every((group) => collapsed.has(group.environment));
-  const toggleAll = () => setCollapsed(allCollapsed ? new Set() : new Set(groups.map((group) => group.environment)));
+  useEffect(() => {
+    if (!menu) return;
+    const close = (event: MouseEvent) => { if (!menuRef.current?.contains(event.target as Node)) setMenu(undefined); };
+    const escape = (event: KeyboardEvent) => event.key === 'Escape' && setMenu(undefined);
+    window.addEventListener('mousedown', close); window.addEventListener('keydown', escape); window.addEventListener('blur', () => setMenu(undefined), { once: true });
+    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('keydown', escape); };
+  }, [menu]);
 
-  return (
-    <aside className={`sidebar connection-sidebar ${compact ? 'is-compact' : ''}`}>
-      <div className="sidebar-heading">
-        <p className="sidebar-title">连接管理</p>
-        <div className="sidebar-tools">
-          <button type="button" title={allCollapsed ? '展开全部' : '折叠全部'} onClick={toggleAll}>{allCollapsed ? '»' : '«'}</button>
-          <button type="button" title="新建连接" className="sidebar-tool-primary" onClick={props.onAdd}>＋</button>
-        </div>
+  const openMenu = (server: ServerProfile, x: number, y: number) => {
+    props.onSelect(server);
+    setMenu({ server, x: Math.min(x, window.innerWidth - 220), y: Math.min(y, window.innerHeight - 340) });
+  };
+  const run = (action: (server: ServerProfile) => void) => { if (menu) action(menu.server); setMenu(undefined); };
+  const connected = menu ? props.connections[menu.server.id]?.state === 'connected' : false;
+
+  return <aside className={`sidebar connection-sidebar ${compact ? 'is-compact' : ''}`}>
+    <div className="sidebar-heading">
+      <p className="sidebar-title">连接</p>
+      <div className="sidebar-tools">
+        <button type="button" title="新建连接" className="sidebar-tool-primary" onClick={props.onAdd}>＋</button>
+        <button type="button" title="刷新连接列表" onClick={props.onRefresh}>↻</button>
       </div>
-      <div className="sidebar-search-row">
-        <span className="sidebar-search-icon">⌕</span>
-        <input
-          className="sidebar-search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="搜索服务器 / 备注"
-          aria-label="搜索服务器或备注"
-        />
-        {query && <button type="button" className="search-clear" title="清除搜索" onClick={() => setQuery('')}>×</button>}
-        <button type="button" className={`density-toggle ${compact ? 'active' : ''}`} title={compact ? '切换舒适视图' : '切换紧凑视图'} onClick={() => setCompact((value) => !value)}>☷</button>
-      </div>
-      {groups.length === 0 && (
-        <div className="sidebar-empty connection-empty">
-          <span>▤</span>
-          <p>{query ? '没有匹配的服务器' : '暂无连接'}</p>
-          {!query && <button type="button" onClick={props.onAdd}>新建连接</button>}
-        </div>
-      )}
-      {groups.map((group) => (
-        <section key={group.environment} className="server-group">
-          <button type="button" className="group-label" onClick={() => toggleGroup(group.environment)}><span>{collapsed.has(group.environment) ? '›' : '⌄'}</span>{ENVIRONMENT_LABELS[group.environment]} <small>{group.items.length}</small></button>
-          {!collapsed.has(group.environment) && group.items.map((item) => {
-            const connection = props.connections[item.id];
-            const status = statusLabel(connection);
-            const connected = connection?.state === 'connected';
-            const active = props.activeServerId === item.id;
-            return (
-              <article
-                key={item.id}
-                className={`server-row ${active ? 'active' : ''}`}
-                onClick={() => props.onSelect(item)}
-              >
-                <div className="server-row-main">
-                  <strong><i className={`server-dot ${connected ? 'online' : ''}`} />{item.name}</strong>
-                  <span>{item.username}@{item.host}</span>
-                </div>
-                <span className={`server-status ${status.className}`}>{status.text}</span>
-                <div className="server-row-actions" onClick={(event) => event.stopPropagation()}>
-                  {connected ? (
-                    <>
-                      <button title="打开终端" disabled={props.busyServerId === item.id} onClick={() => props.onSelect(item)}>▣</button>
-                      <button title="重新连接" disabled={props.busyServerId === item.id} onClick={() => props.onReconnect(item)}>↻</button>
-                      <button className="danger" title="断开连接" disabled={props.busyServerId === item.id} onClick={() => props.onDisconnect(item)}>×</button>
-                    </>
-                  ) : (
-                    <>
-                      <button className="connect" title="连接" disabled={props.busyServerId === item.id} onClick={() => props.onConnect(item)}>↗</button>
-                      <button title="编辑连接" onClick={() => props.onEdit(item)}>✎</button>
-                    </>
-                  )}
-                </div>
-              </article>
-            );
-          })}
-        </section>
-      ))}
-    </aside>
-  );
+    </div>
+    <div className="sidebar-search-row">
+      <span className="sidebar-search-icon">⌕</span>
+      <input className="sidebar-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索连接" aria-label="搜索连接" />
+      {query && <button type="button" className="search-clear" title="清除搜索" onClick={() => setQuery('')}>×</button>}
+      <button type="button" className={`density-toggle ${compact ? 'active' : ''}`} title="切换列表密度" onClick={() => setCompact((value) => !value)}>☷</button>
+    </div>
+    {!filtered.length && <div className="sidebar-empty connection-empty"><span>▤</span><p>{query ? '没有匹配的连接' : '暂无连接'}</p>{!query && <button type="button" onClick={props.onAdd}>新建连接</button>}</div>}
+    <section className="server-group flat-server-list">
+      {filtered.map((server) => {
+        const connection = props.connections[server.id];
+        const isConnected = connection?.state === 'connected';
+        const isBusy = props.busyServerId === server.id;
+        return <article key={server.id} className={`server-row ${props.activeServerId === server.id ? 'active' : ''} ${isBusy ? 'busy' : ''}`}
+          tabIndex={0} title="双击打开终端 · 右键查看更多操作"
+          onClick={() => props.onSelect(server)}
+          onDoubleClick={() => !isBusy && props.onOpenTerminal(server)}
+          onContextMenu={(event) => { event.preventDefault(); openMenu(server, event.clientX, event.clientY); }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !isBusy) props.onOpenTerminal(server);
+            if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) { event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); openMenu(server, rect.left + 24, rect.top + 24); }
+          }}>
+          <span className="session-icon">▣</span>
+          <div className="server-row-main"><strong>{server.name}</strong>{!compact && <span>{server.username}@{server.host}:{server.port}</span>}</div>
+          <i className={`connection-indicator ${isConnected ? 'online' : ''}`} title={isConnected ? '已连接' : '未连接'} />
+          <span className="row-menu-trigger" aria-hidden="true">⋮</span>
+        </article>;
+      })}
+    </section>
+    {menu && <div ref={menuRef} className="connection-context-menu" style={{ left: menu.x, top: menu.y }} role="menu">
+      <header><i className={connected ? 'online' : ''} /><span><strong>{menu.server.name}</strong><small>{menu.server.username}@{menu.server.host}:{menu.server.port}</small></span></header>
+      <button className="menu-primary" onClick={() => run(props.onOpenTerminal)}><span>▣</span>打开终端<kbd>Enter</kbd></button>
+      <button onClick={() => run(props.onOpenFiles)}><span>▱</span>文件传输</button>
+      <button onClick={() => run(props.onOpenMonitoring)}><span>▨</span>系统监控</button>
+      <hr />
+      {connected ? <>
+        <button onClick={() => run(props.onReconnect)}><span>↻</span>重新连接</button>
+        <button onClick={() => run(props.onDisconnect)}><span>×</span>断开连接</button>
+      </> : <button onClick={() => run(props.onOpenTerminal)}><span>↗</span>连接并打开终端</button>}
+      <hr />
+      <button onClick={() => run(props.onEdit)}><span>✎</span>编辑连接<kbd>Ctrl E</kbd></button>
+      <button onClick={() => run(props.onDuplicate)}><span>▣</span>复制连接</button>
+      <hr />
+      <button className="danger" onClick={() => run(props.onDelete)}><span>⌫</span>删除连接<kbd>Del</kbd></button>
+    </div>}
+  </aside>;
 }

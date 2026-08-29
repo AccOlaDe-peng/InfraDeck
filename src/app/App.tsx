@@ -109,8 +109,16 @@ export default function App() {
 
   const selectedServer = profiles.find((item) => item.id === selectedServerId);
   const connectedServers = profiles.filter((item) => connections[item.id]?.state === 'connected');
-  const showHome = !activePane && connectedServers.length === 0;
+  // The dashboard is the permanent empty-workspace view. Connections may stay
+  // alive after their last tab closes; that must not expose a blank terminal.
+  const showHome = !activePane;
   const notify = (text: string) => setBanner({ kind: 'success', text });
+
+  useEffect(() => {
+    if (!banner) return;
+    const timeout = window.setTimeout(() => setBanner(undefined), banner.kind === 'success' ? 3500 : 7000);
+    return () => window.clearTimeout(timeout);
+  }, [banner]);
 
   const refresh = async () => {
     try {
@@ -265,6 +273,31 @@ export default function App() {
       setActiveTabId(tab.id);
       setActivePane({ kind: 'terminal', id: tab.id });
       setSelectedServerId(item.id);
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    finally { setBusyServerId(undefined); }
+  };
+
+  const openServerView = async (item: ServerProfile, view: 'files' | 'containers') => {
+    setBusyServerId(item.id);
+    try {
+      await ensureConnected(item);
+      setSelectedServerId(item.id);
+      openView(view);
+    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    finally { setBusyServerId(undefined); }
+  };
+
+  const deleteServer = async (item: ServerProfile) => {
+    if (!window.confirm(`删除连接“${item.name}”？此操作不会删除远端数据。`)) return;
+    setBusyServerId(item.id);
+    try {
+      if (connections[item.id]) await api.disconnect(connections[item.id].id);
+      for (const tab of tabs.filter((candidate) => candidate.serverId === item.id)) await closeTab(tab.id);
+      await api.deleteServerProfile(item.id);
+      setProfiles((current) => current.filter((candidate) => candidate.id !== item.id));
+      setConnections((current) => { const next = { ...current }; delete next[item.id]; return next; });
+      if (selectedServerId === item.id) setSelectedServerId(undefined);
+      notify(`已删除连接“${item.name}”。`);
     } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
     finally { setBusyServerId(undefined); }
   };
@@ -470,8 +503,6 @@ export default function App() {
         onSettings={() => openView('settings')}
       />
 
-      {banner && <div className={banner.kind === 'error' ? 'banner error' : 'banner success'} onClick={() => setBanner(undefined)}>{banner.text}</div>}
-
       {hostKeyPrompt && (
         <section className="hostkey-card">
           <div>
@@ -498,12 +529,17 @@ export default function App() {
           connections={connections}
           activeServerId={selectedServerId}
           busyServerId={busyServerId}
-          onSelect={(item) => { setSelectedServerId(item.id); if (connections[item.id]?.state === 'connected') void openTerminalFor(item); }}
-          onConnect={(item) => void connect(item)}
+          onSelect={(item) => setSelectedServerId(item.id)}
+          onOpenTerminal={(item) => void openTerminalFor(item)}
+          onOpenFiles={(item) => void openServerView(item, 'files')}
+          onOpenMonitoring={(item) => void openServerView(item, 'containers')}
           onDisconnect={(item) => void disconnect(item)}
           onReconnect={(item) => void reconnect(item)}
           onEdit={(item) => { setEditingProfile(item); setShowProfileForm(true); }}
+          onDuplicate={(item) => { setEditingProfile({ ...item, id: crypto.randomUUID(), name: `${item.name} 副本` }); setShowProfileForm(true); }}
+          onDelete={(item) => void deleteServer(item)}
           onAdd={() => { setEditingProfile(undefined); setShowProfileForm(true); }}
+          onRefresh={() => void refresh()}
         />
 
         <SidebarResizeHandle side="left" value={leftSidebarWidth} min={160} max={360} defaultValue={190} onChange={resizeLeftSidebar} />
@@ -526,12 +562,10 @@ export default function App() {
             tabs={tabs}
             openViews={openViews}
             activePane={activePane}
-            profiles={profiles}
             onSelectTerminal={(tabId) => { setActiveTabId(tabId); setActivePane({ kind: 'terminal', id: tabId }); }}
             onCloseTerminal={(tabId) => void closeTab(tabId)}
             onRenameTerminal={(tabId, title) => setTabs((current) => current.map((tab) => (tab.id === tabId ? { ...tab, title } : tab)))}
             onReconnectTerminal={(tabId) => void reopenTerminal(tabId)}
-            onOpenTerminal={(server) => void openTerminalFor(server)}
             onOpenView={openView}
             onCloseView={closeView}
           />
@@ -653,6 +687,19 @@ export default function App() {
         <span>UTF-8⌄</span>
         <button className="text-button" onClick={() => void refresh()}>♙</button>
       </footer>
+
+      {banner && (
+        <div
+          className={`toast-host ${banner.kind}`}
+          style={{ '--toast-right': `${((showHome && !isMac) || (!showHome && !aiCollapsed)) ? rightSidebarWidth + 14 : 12}px` } as CSSProperties}
+          role={banner.kind === 'error' ? 'alert' : 'status'}
+          aria-live={banner.kind === 'error' ? 'assertive' : 'polite'}
+        >
+          <span className="toast-mark">{banner.kind === 'success' ? '✓' : '!'}</span>
+          <div><strong>{banner.kind === 'success' ? '操作完成' : '操作失败'}</strong><p>{banner.text}</p></div>
+          <button aria-label="关闭提示" onClick={() => setBanner(undefined)}>×</button>
+        </div>
+      )}
 
       {(showProfileForm || editingProfile) && (
         <ProfileForm

@@ -632,9 +632,11 @@ impl<P: SshProvider> SshManager<P> {
     }
 
     pub async fn terminal_write(&self, session_id: &str, data: &[u8]) -> Result<(), SshError> {
-        let sessions = self.terminal_sessions.lock().await;
-        let pty_id = Self::resolve_pty(&sessions, session_id)?;
-        self.provider.pty_write(pty_id, data).await
+        let pty_id = {
+            let sessions = self.terminal_sessions.lock().await;
+            Self::resolve_pty(&sessions, session_id)?.to_owned()
+        };
+        self.provider.pty_write(&pty_id, data).await
     }
 
     pub async fn terminal_resize(
@@ -643,15 +645,19 @@ impl<P: SshProvider> SshManager<P> {
         cols: u16,
         rows: u16,
     ) -> Result<(), SshError> {
-        let sessions = self.terminal_sessions.lock().await;
-        let pty_id = Self::resolve_pty(&sessions, session_id)?;
-        self.provider.pty_resize(pty_id, cols, rows).await
+        let pty_id = {
+            let sessions = self.terminal_sessions.lock().await;
+            Self::resolve_pty(&sessions, session_id)?.to_owned()
+        };
+        self.provider.pty_resize(&pty_id, cols, rows).await
     }
 
     pub async fn terminal_read(&self, session_id: &str) -> Result<PtyChunk, SshError> {
-        let sessions = self.terminal_sessions.lock().await;
-        let pty_id = Self::resolve_pty(&sessions, session_id)?;
-        self.provider.pty_take_output(pty_id).await
+        let pty_id = {
+            let sessions = self.terminal_sessions.lock().await;
+            Self::resolve_pty(&sessions, session_id)?.to_owned()
+        };
+        self.provider.pty_take_output(&pty_id).await
     }
 
     pub async fn terminal_close(&self, session_id: &str) -> Result<(), SshError> {

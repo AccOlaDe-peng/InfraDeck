@@ -14,6 +14,9 @@ function decodeBase64(value: string): Uint8Array {
 /** Renders one PTY session into an xterm.js surface with 60ms output polling. */
 export default function TerminalView({ sessionId, onClosed }: { sessionId: string; onClosed?: () => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const onClosedRef = useRef(onClosed);
+
+  useEffect(() => { onClosedRef.current = onClosed; }, [onClosed]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -29,29 +32,62 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
     term.open(host);
     try { fit.fit(); } catch { /* container may be hidden during transition */ }
 
+    // Coalesce fast key bursts into one IPC call while preserving strict write
+    // order. Eight milliseconds stays below one 60 Hz frame.
+    let inputBuffer = '';
+    let inputTimer: number | undefined;
+    let writeChain: Promise<void> = Promise.resolve();
+    const flushInput = () => {
+      if (inputTimer !== undefined) window.clearTimeout(inputTimer);
+      inputTimer = undefined;
+      if (!inputBuffer) return;
+      const payload = inputBuffer;
+      inputBuffer = '';
+      writeChain = writeChain.then(() => api.terminalWrite(sessionId, payload)).catch(() => undefined);
+    };
     const dataDisposable = term.onData((data) => {
-      void api.terminalWrite(sessionId, data).catch(() => undefined);
+      inputBuffer += data;
+      if (inputBuffer.length >= 1024 || data.length > 32) flushInput();
+      else if (inputTimer === undefined) inputTimer = window.setTimeout(flushInput, 8);
     });
 
+    // Single-flight adaptive polling: never start another IPC read before the
+    // previous read has completed. Active output is sampled per frame; idle
+    // sessions back off to reduce overhead.
     let polling = true;
-    const timer = window.setInterval(() => {
-      void (async () => {
-        if (!polling) return;
+    let readTimer: number | undefined;
+    const wait = (delay: number) => new Promise<void>((resolve) => {
+      readTimer = window.setTimeout(resolve, delay);
+    });
+    const readLoop = async () => {
+      let idleRounds = 0;
+      while (polling) {
         try {
           const chunk = await api.terminalRead(sessionId);
-          if (chunk.dataBase64) term.write(decodeBase64(chunk.dataBase64));
+          if (!polling) break;
+          if (chunk.dataBase64) {
+            idleRounds = 0;
+            term.write(decodeBase64(chunk.dataBase64));
+          } else {
+            idleRounds = Math.min(idleRounds + 1, 10);
+          }
           if (chunk.closed) {
             term.write('\r\n\x1b[33m[会话已关闭]\x1b[0m\r\n');
             polling = false;
-            onClosed?.();
+            onClosedRef.current?.();
+            break;
           }
+          const delay = document.hidden ? 100 : idleRounds < 2 ? 12 : idleRounds < 6 ? 24 : 48;
+          await wait(delay);
         } catch {
+          if (!polling) break;
           polling = false;
           term.write('\r\n\x1b[31m[终端连接丢失]\x1b[0m\r\n');
-          onClosed?.();
+          onClosedRef.current?.();
         }
-      })();
-    }, 60);
+      }
+    };
+    void readLoop();
 
     const resize = () => {
       try { fit.fit(); } catch { return; }
@@ -62,12 +98,13 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
 
     return () => {
       polling = false;
-      window.clearInterval(timer);
+      if (readTimer !== undefined) window.clearTimeout(readTimer);
+      flushInput();
       observer.disconnect();
       dataDisposable.dispose();
       term.dispose();
     };
-  }, [sessionId, onClosed]);
+  }, [sessionId]);
 
   return <div ref={hostRef} className="terminal-host" />;
 }

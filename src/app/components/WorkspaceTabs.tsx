@@ -1,4 +1,3 @@
-import type { ServerProfile } from '../../types/contracts';
 import type { TerminalTab } from './TerminalTabs';
 
 export type WorkspacePane =
@@ -20,13 +19,11 @@ const VIEW_LABELS: Record<WorkspaceView, string> = {
 interface Props {
   tabs: TerminalTab[];
   activePane?: WorkspacePane;
-  profiles: ServerProfile[];
   openViews: WorkspaceView[];
   onSelectTerminal: (tabId: string) => void;
   onCloseTerminal: (tabId: string) => void;
   onRenameTerminal: (tabId: string, title: string) => void;
   onReconnectTerminal: (tabId: string) => void;
-  onOpenTerminal: (server: ServerProfile) => void;
   onOpenView: (view: WorkspaceView) => void;
   onCloseView: (view: WorkspaceView) => void;
 }
@@ -43,10 +40,6 @@ function samePane(a: WorkspacePane, b: WorkspacePane): boolean {
 export default function WorkspaceTabs(props: Props) {
   const active = props.activePane;
   const activeTab = active?.kind === 'terminal' ? props.tabs.find((tab) => tab.id === active.id) : undefined;
-  const connectedServers = props.profiles.filter(
-    (item) => !props.tabs.some((tab) => tab.serverId === item.id && !tab.closed),
-  );
-
   return (
     <div className="tab-strip">
       {props.tabs.map((tab) => (
@@ -78,17 +71,6 @@ export default function WorkspaceTabs(props: Props) {
       {activeTab?.closed && (
         <button className="tiny-button connect tab-new" onClick={() => props.onReconnectTerminal(activeTab.id)}>重连此终端</button>
       )}
-      <select
-        className="tab-new"
-        value=""
-        onChange={(event) => {
-          const server = props.profiles.find((item) => item.id === event.target.value);
-          if (server) props.onOpenTerminal(server);
-        }}
-      >
-        <option value="">+ 新建终端…</option>
-        {connectedServers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-      </select>
     </div>
   );
 }
