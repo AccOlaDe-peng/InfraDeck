@@ -5,13 +5,15 @@ export type WorkspacePane =
   | { kind: 'terminal'; id: string }
   | { kind: 'files' }
   | { kind: 'containers' }
+  | { kind: 'audit' }
   | { kind: 'settings' };
 
-export type WorkspaceView = 'files' | 'containers' | 'settings';
+export type WorkspaceView = 'files' | 'containers' | 'audit' | 'settings';
 
 const VIEW_LABELS: Record<WorkspaceView, string> = {
   files: '▤ 文件',
   containers: '📦 容器',
+  audit: '▣ 审计记录',
   settings: '⚙ 设置',
 };
 

@@ -2,6 +2,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -42,6 +43,60 @@ pub struct TransferJobDto {
     pub source_connection_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalFileEntryDto {
+    pub name: String,
+    pub path: String,
+    pub kind: String,
+    pub size: u64,
+    pub modified_at: Option<String>,
+}
+
+#[tauri::command]
+pub fn local_fs_home() -> Result<String, AppError> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| AppError::Internal("无法确定本地用户目录".into()))
+}
+
+#[tauri::command]
+pub async fn local_fs_list(path: String) -> Result<Vec<LocalFileEntryDto>, AppError> {
+    let root = PathBuf::from(&path);
+    if !root.is_absolute() || !root.is_dir() {
+        return Err(AppError::Validation("本地路径必须是已存在的绝对目录".into()));
+    }
+    let mut reader = tokio::fs::read_dir(&root).await.map_err(|error| AppError::Fs {
+        code: "LOCAL_FS_LIST_FAILED".into(),
+        message: error.to_string(),
+    })?;
+    let mut entries = Vec::new();
+    while let Some(entry) = reader.next_entry().await.map_err(|error| AppError::Fs {
+        code: "LOCAL_FS_LIST_FAILED".into(),
+        message: error.to_string(),
+    })? {
+        let metadata = entry.metadata().await.map_err(|error| AppError::Fs {
+            code: "LOCAL_FS_STAT_FAILED".into(),
+            message: error.to_string(),
+        })?;
+        let kind = if metadata.is_dir() { "directory" } else if metadata.is_file() { "file" } else { "symlink" };
+        let modified_at = metadata.modified().ok().map(|value| chrono::DateTime::<Utc>::from(value).to_rfc3339());
+        entries.push(LocalFileEntryDto {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            path: entry.path().to_string_lossy().into_owned(),
+            kind: kind.into(),
+            size: metadata.len(),
+            modified_at,
+        });
+    }
+    entries.sort_by(|a, b| {
+        let a_dir = a.kind == "directory";
+        let b_dir = b.kind == "directory";
+        b_dir.cmp(&a_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    Ok(entries)
 }
 
 /// Per-transfer control handle shared between the paused/resumed loop and the

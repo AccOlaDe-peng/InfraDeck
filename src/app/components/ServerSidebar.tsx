@@ -24,6 +24,8 @@ function statusLabel(connection?: ConnectionDto): { text: string; className: str
 /** Left rail: environment grouping, search, per-server status and actions. */
 export default function ServerSidebar(props: Props) {
   const [query, setQuery] = useState('');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [compact, setCompact] = useState(true);
 
   const groups = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -40,22 +42,48 @@ export default function ServerSidebar(props: Props) {
     })).filter((group) => group.items.length > 0);
   }, [props.profiles, query]);
 
+  const toggleGroup = (environment: string) => {
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (next.has(environment)) next.delete(environment); else next.add(environment);
+      return next;
+    });
+  };
+  const allCollapsed = groups.length > 0 && groups.every((group) => collapsed.has(group.environment));
+  const toggleAll = () => setCollapsed(allCollapsed ? new Set() : new Set(groups.map((group) => group.environment)));
+
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar connection-sidebar ${compact ? 'is-compact' : ''}`}>
       <div className="sidebar-heading">
         <p className="sidebar-title">连接管理</p>
+        <div className="sidebar-tools">
+          <button type="button" title={allCollapsed ? '展开全部' : '折叠全部'} onClick={toggleAll}>{allCollapsed ? '»' : '«'}</button>
+          <button type="button" title="新建连接" className="sidebar-tool-primary" onClick={props.onAdd}>＋</button>
+        </div>
       </div>
-      <input
-        className="sidebar-search"
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        placeholder="⌕  搜索服务器 / 备注（⌘K）"
-      />
-      {groups.length === 0 && <div className="sidebar-empty">没有匹配的服务器</div>}
+      <div className="sidebar-search-row">
+        <span className="sidebar-search-icon">⌕</span>
+        <input
+          className="sidebar-search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="搜索服务器 / 备注"
+          aria-label="搜索服务器或备注"
+        />
+        {query && <button type="button" className="search-clear" title="清除搜索" onClick={() => setQuery('')}>×</button>}
+        <button type="button" className={`density-toggle ${compact ? 'active' : ''}`} title={compact ? '切换舒适视图' : '切换紧凑视图'} onClick={() => setCompact((value) => !value)}>☷</button>
+      </div>
+      {groups.length === 0 && (
+        <div className="sidebar-empty connection-empty">
+          <span>▤</span>
+          <p>{query ? '没有匹配的服务器' : '暂无连接'}</p>
+          {!query && <button type="button" onClick={props.onAdd}>新建连接</button>}
+        </div>
+      )}
       {groups.map((group) => (
         <section key={group.environment} className="server-group">
-          <p className="group-label"><span>⌄</span>{ENVIRONMENT_LABELS[group.environment]}（{group.items.length}）</p>
-          {group.items.map((item) => {
+          <button type="button" className="group-label" onClick={() => toggleGroup(group.environment)}><span>{collapsed.has(group.environment) ? '›' : '⌄'}</span>{ENVIRONMENT_LABELS[group.environment]} <small>{group.items.length}</small></button>
+          {!collapsed.has(group.environment) && group.items.map((item) => {
             const connection = props.connections[item.id];
             const status = statusLabel(connection);
             const connected = connection?.state === 'connected';
@@ -74,14 +102,14 @@ export default function ServerSidebar(props: Props) {
                 <div className="server-row-actions" onClick={(event) => event.stopPropagation()}>
                   {connected ? (
                     <>
-                      <button className="tiny-button" disabled={props.busyServerId === item.id} onClick={() => props.onSelect(item)}>终端</button>
-                      <button className="tiny-button" disabled={props.busyServerId === item.id} onClick={() => props.onReconnect(item)}>重连</button>
-                      <button className="tiny-button danger" disabled={props.busyServerId === item.id} onClick={() => props.onDisconnect(item)}>断开</button>
+                      <button title="打开终端" disabled={props.busyServerId === item.id} onClick={() => props.onSelect(item)}>▣</button>
+                      <button title="重新连接" disabled={props.busyServerId === item.id} onClick={() => props.onReconnect(item)}>↻</button>
+                      <button className="danger" title="断开连接" disabled={props.busyServerId === item.id} onClick={() => props.onDisconnect(item)}>×</button>
                     </>
                   ) : (
                     <>
-                      <button className="tiny-button connect" disabled={props.busyServerId === item.id} onClick={() => props.onConnect(item)}>连接</button>
-                      <button className="tiny-button" onClick={() => props.onEdit(item)}>编辑</button>
+                      <button className="connect" title="连接" disabled={props.busyServerId === item.id} onClick={() => props.onConnect(item)}>↗</button>
+                      <button title="编辑连接" onClick={() => props.onEdit(item)}>✎</button>
                     </>
                   )}
                 </div>
@@ -90,7 +118,6 @@ export default function ServerSidebar(props: Props) {
           })}
         </section>
       ))}
-      <button className="sidebar-add" type="button" onClick={props.onAdd}>＋ 新建连接</button>
     </aside>
   );
 }

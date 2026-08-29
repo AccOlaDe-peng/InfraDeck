@@ -98,6 +98,7 @@ export interface TerminalReadDto { dataBase64: string; closed: boolean }
 
 export type FileKind = 'file' | 'directory' | 'symlink' | 'other';
 export interface FileEntry { name: string; path: string; kind: FileKind; size: number; mode: string; ownerId?: number; groupId?: number; modifiedAt?: string; symlinkTarget?: string; }
+export interface LocalFileEntry { name: string; path: string; kind: FileKind; size: number; modifiedAt?: string; }
 export type TransferKind = 'upload' | 'download' | 'serverToServer';
 export interface TransferRequest { kind: TransferKind; serverId: ServerId; connectionId: string; remotePath: string; localPath: string; overwrite?: boolean; }
 export type TransferState = 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled';

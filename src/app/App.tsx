@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { api, AppError } from '../lib/tauri';
 import { applyAppearance } from '../lib/theme';
@@ -19,6 +19,10 @@ import ProfileForm from './components/ProfileForm';
 import AuditDrawer from './components/AuditDrawer';
 import FilesView from './components/FilesView';
 import ContainerListView from './components/containers/ContainerListView';
+import HomeDashboard from './components/HomeDashboard';
+import HomeActivityPanel from './components/HomeActivityPanel';
+import { isMac } from '../lib/platform';
+import SidebarResizeHandle from './components/SidebarResizeHandle';
 
 type HostKeyPrompt = { serverId: string; host: string; port: number; algorithm: string; fingerprintSha256: string };
 
@@ -45,6 +49,8 @@ export default function App() {
   const [openViews, setOpenViews] = useState<WorkspaceView[]>([]);
   const [activePane, setActivePane] = useState<WorkspacePane>();
   const [aiCollapsed, setAiCollapsed] = useState(() => localStorage.getItem('infradeck.aiCollapsed') === '1');
+  const [leftSidebarWidth, setLeftSidebarWidth] = useState(() => Number(localStorage.getItem('infradeck.leftSidebarWidth')) || 190);
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(() => Number(localStorage.getItem('infradeck.rightSidebarWidth')) || 300);
 
   // Theme preference is device-local; `system` keeps following the OS live.
   useEffect(() => applyAppearance(), []);
@@ -52,6 +58,14 @@ export default function App() {
   const toggleAiPanel = (collapsed: boolean) => {
     setAiCollapsed(collapsed);
     localStorage.setItem('infradeck.aiCollapsed', collapsed ? '1' : '0');
+  };
+  const resizeLeftSidebar = (width: number) => {
+    setLeftSidebarWidth(width);
+    localStorage.setItem('infradeck.leftSidebarWidth', String(Math.round(width)));
+  };
+  const resizeRightSidebar = (width: number) => {
+    setRightSidebarWidth(width);
+    localStorage.setItem('infradeck.rightSidebarWidth', String(Math.round(width)));
   };
 
   const openView = (view: WorkspaceView) => {
@@ -64,6 +78,7 @@ export default function App() {
       if (current?.kind !== view) return current;
       return openViews.includes('files') && view !== 'files' ? { kind: 'files' }
         : openViews.includes('containers') && view !== 'containers' ? { kind: 'containers' }
+        : openViews.includes('audit') && view !== 'audit' ? { kind: 'audit' }
         : openViews.includes('settings') && view !== 'settings' ? { kind: 'settings' }
         : activeTabId ? { kind: 'terminal', id: activeTabId }
         : undefined;
@@ -86,7 +101,6 @@ export default function App() {
 
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [editingProfile, setEditingProfile] = useState<ServerProfile>();
-  const [showAudit, setShowAudit] = useState(false);
   const [aiConversations, setAiConversations] = useState<AiConversation[]>([]);
   const [aiConversationId, setAiConversationId] = useState<string>();
   const [aiReplay, setAiReplay] = useState<AiMessage[]>([]);
@@ -95,6 +109,7 @@ export default function App() {
 
   const selectedServer = profiles.find((item) => item.id === selectedServerId);
   const connectedServers = profiles.filter((item) => connections[item.id]?.state === 'connected');
+  const showHome = !activePane && connectedServers.length === 0;
   const notify = (text: string) => setBanner({ kind: 'success', text });
 
   const refresh = async () => {
@@ -451,7 +466,7 @@ export default function App() {
         onOpenTerminal={() => { const target = selectedServer ?? connectedServers[0]; if (target) void openTerminalFor(target); }}
         onAddServer={() => { setEditingProfile(undefined); setShowProfileForm(true); }}
         onPalette={() => setPaletteOpen(true)}
-        onAudit={() => setShowAudit(true)}
+        onAudit={() => openView('audit')}
         onSettings={() => openView('settings')}
       />
 
@@ -474,7 +489,10 @@ export default function App() {
       )}
       {/* 工具审批内联在 AI 面板（dbx 式：不打断、可忽略、留痕）；收起时窄栏圆点提醒 */}
 
-      <div className={`workspace-grid ${aiCollapsed ? 'ai-collapsed' : ''}`}>
+      <div
+        className={`workspace-grid ${aiCollapsed ? 'ai-collapsed' : ''} ${showHome ? 'home-mode' : ''} ${showHome && !isMac ? 'windows-home-mode' : ''}`}
+        style={{ '--left-sidebar-width': `${leftSidebarWidth}px`, '--right-sidebar-width': `${rightSidebarWidth}px` } as CSSProperties}
+      >
         <ServerSidebar
           profiles={profiles}
           connections={connections}
@@ -488,7 +506,20 @@ export default function App() {
           onAdd={() => { setEditingProfile(undefined); setShowProfileForm(true); }}
         />
 
+        <SidebarResizeHandle side="left" value={leftSidebarWidth} min={160} max={360} defaultValue={190} onChange={resizeLeftSidebar} />
+
         <section className="workspace-main">
+          {showHome ? (
+            <HomeDashboard
+              profiles={profiles}
+              connections={connections}
+              onAddServer={() => { setEditingProfile(undefined); setShowProfileForm(true); }}
+              onConnect={(server) => void connect(server)}
+              onOpenTerminal={(server) => void openTerminalFor(server)}
+              onOpenSettings={() => openView('settings')}
+              onOpenPalette={() => setPaletteOpen(true)}
+            />
+          ) : (<>
           <QuickActions server={selectedServer ?? connectedServers[0]} connectedCount={connectedServers.length} busy={busyServerId !== undefined} onRun={(command, service, batchMode) => void runTool(command, service, batchMode)} />
           {lastToolResult && <code className="exec-output tool-last">{lastToolResult.summary}</code>}
           <WorkspaceTabs
@@ -514,6 +545,9 @@ export default function App() {
                 onError={(text) => setBanner({ kind: 'error', text })}
               />
             );
+          }
+          if (activePane?.kind === 'audit') {
+            return <AuditDrawer profiles={profiles} embedded onClose={() => closeView('audit')} />;
           }
           if (activePane?.kind === 'files') {
             return connected ? (
@@ -562,9 +596,14 @@ export default function App() {
               onClose={(tabId) => void closeTab(tabId)}
             />
           ); })()}
+          </>)}
         </section>
 
-        {aiCollapsed ? (
+        {(showHome && !isMac) || (!showHome && !aiCollapsed) ? (
+          <SidebarResizeHandle side="right" value={rightSidebarWidth} min={240} max={480} defaultValue={300} onChange={resizeRightSidebar} />
+        ) : !showHome && aiCollapsed ? <div className="resize-handle-placeholder" /> : null}
+
+        {showHome && !isMac ? <HomeActivityPanel /> : !showHome && (aiCollapsed ? (
           <aside className="ai-rail">
             <button
               className="ai-rail-toggle"
@@ -587,7 +626,7 @@ export default function App() {
           activeConversationId={aiConversationId}
           replay={aiReplay}
           streamingText={aiStreaming}
-          onOpenAudit={() => setShowAudit(true)}
+          onOpenAudit={() => openView('audit')}
           onCollapse={() => toggleAiPanel(true)}
           onConversationSelect={(id) => void selectConversation(id)}
           onConversationDelete={(id) => void deleteConversation(id)}
@@ -599,7 +638,7 @@ export default function App() {
           onCancel={() => void cancelAiRun()}
           onOpenSettings={() => openView('settings')}
         />
-        )}
+        ))}
       </div>
 
       <footer className="statusbar">
@@ -615,7 +654,6 @@ export default function App() {
         <button className="text-button" onClick={() => void refresh()}>♙</button>
       </footer>
 
-      {showAudit && <AuditDrawer profiles={profiles} onClose={() => setShowAudit(false)} />}
       {(showProfileForm || editingProfile) && (
         <ProfileForm
           editing={editingProfile}

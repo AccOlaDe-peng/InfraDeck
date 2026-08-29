@@ -55,7 +55,7 @@ export default function CommandPalette({ open, onClose, commands, toolCommands }
   return (
     <div className="modal-backdrop palette-backdrop" onClick={onClose}>
       <div className="modal palette" onClick={(event) => event.stopPropagation()}>
-        <input
+        <div className="palette-search"><span>⌕</span><input
           autoFocus
           className="palette-input"
           value={query}
@@ -67,7 +67,7 @@ export default function CommandPalette({ open, onClose, commands, toolCommands }
             if (event.key === 'Enter') { event.preventDefault(); execute(items[index]); }
             if (event.key === 'Escape') onClose();
           }}
-        />
+        /><kbd>Ctrl K</kbd></div>
         <div className="palette-list">
           {items.length === 0 && <div className="sidebar-empty">没有匹配的命令</div>}
           {items.map((item, position) => (
@@ -82,6 +82,7 @@ export default function CommandPalette({ open, onClose, commands, toolCommands }
             </button>
           ))}
         </div>
+        <footer className="palette-footer"><span>↑↓ 选择</span><span>Enter 执行</span><span>Esc 关闭</span></footer>
       </div>
     </div>
   );

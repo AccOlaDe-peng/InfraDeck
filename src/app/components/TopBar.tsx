@@ -5,7 +5,7 @@ import { isMac } from '../../lib/platform';
 interface Props {
   healthReady: boolean;
   /** Currently active workspace pane when it is a view (files/containers/settings). */
-  activeView?: 'files' | 'containers' | 'settings';
+  activeView?: 'files' | 'containers' | 'audit' | 'settings';
   connected: boolean;
   onView: (view: 'files' | 'containers') => void;
   onOpenTerminal: () => void;
@@ -38,16 +38,17 @@ export default function TopBar(props: Props) {
   useEffect(() => {
     if (isMac) return;
     const win = getCurrentWindow();
-    const unlisten = win.onResized(() => void win.isMaximized().then(setMaximized));
+    const syncMaximized = () => void win.isMaximized().then(setMaximized);
+    syncMaximized();
+    const unlisten = win.onResized(syncMaximized);
     return () => { void unlisten.then((fn) => fn()); };
   }, []);
 
   return (
-    <header className="topbar" data-tauri-drag-region>
-      <div className="traffic-lights" aria-hidden="true"><i /><i /><i /></div>
+    <header className={`topbar ${isMac ? 'topbar-macos' : 'topbar-windows'}`} data-tauri-drag-region>
       <div className="topbar-actions" data-tauri-drag-region>
         <button className="topbar-btn" onClick={props.onAddServer}><span className="topbar-icon">⌗</span>新建连接</button>
-        <button className="topbar-btn" disabled={!props.connected} onClick={props.onOpenTerminal}><span className="topbar-icon">▣</span>新建终端</button>
+        <button className="topbar-btn" disabled={!props.connected} onClick={props.onOpenTerminal}><span className="topbar-icon">▣</span>打开终端</button>
         <button
           className={`topbar-btn ${props.activeView === 'files' ? 'active' : ''}`}
           disabled={!props.connected}
@@ -70,14 +71,14 @@ export default function TopBar(props: Props) {
           )}
         </div>
       </div>
-      <button className="topbar-utility" title="通知">♧</button>
-      <button className="topbar-btn settings-shortcut" onClick={props.onSettings}>⚙ <span>设置</span></button>
-      <span className="user-avatar" aria-label="用户">●</span>
+      {isMac && <button className="topbar-utility" title="通知">♧</button>}
+      {isMac && <button className="topbar-btn settings-shortcut" onClick={props.onSettings}>⚙ <span>设置</span></button>}
+      {isMac && <span className="user-avatar" aria-label="用户">●</span>}
       {!isMac && (
         <div className="window-controls">
-          <button className="window-btn" title="最小化" onClick={() => void getCurrentWindow().minimize()}>─</button>
-          <button className="window-btn" title={maximized ? '还原' : '最大化'} onClick={() => void getCurrentWindow().toggleMaximize()}>{maximized ? '❐' : '□'}</button>
-          <button className="window-btn close" title="关闭" onClick={() => void getCurrentWindow().close()}>×</button>
+          <button className="window-btn" title="最小化" aria-label="最小化" onClick={() => void getCurrentWindow().minimize()}>─</button>
+          <button className="window-btn" title={maximized ? '还原' : '最大化'} aria-label={maximized ? '还原' : '最大化'} onClick={() => void getCurrentWindow().toggleMaximize()}>{maximized ? '❐' : '□'}</button>
+          <button className="window-btn close" title="关闭" aria-label="关闭" onClick={() => void getCurrentWindow().close()}>×</button>
         </div>
       )}
     </header>

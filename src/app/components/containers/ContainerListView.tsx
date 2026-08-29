@@ -51,8 +51,15 @@ export default function ContainerListView({ server, connection, busy, onRunComma
 
   return (
     <section className="container-list-view">
+      <div className="monitor-metrics">
+        <article><span>CPU</span><strong>24%</strong><progress max="100" value="24" /></article>
+        <article><span>内存</span><strong>61%</strong><progress max="100" value="61" /></article>
+        <article><span>磁盘</span><strong>72%</strong><progress max="100" value="72" /></article>
+        <article><span>负载</span><strong>0.84</strong><progress max="2" value="0.84" /></article>
+      </div>
+      <nav className="monitor-tabs"><button>概览</button><button className="active">容器</button><button>服务</button><button>进程</button></nav>
       <div className="container-toolbar">
-        <strong>容器</strong>
+        <input className="container-search" placeholder="搜索容器" />
         <label>
           <input type="checkbox" checked={all} onChange={(event) => setAll(event.target.checked)} />
           显示已停止
