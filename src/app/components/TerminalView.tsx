@@ -24,6 +24,7 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
     const term = new Terminal({
       cursorBlink: true,
       fontSize: 13,
+      scrollback: 5000,
       fontFamily: "'SF Mono', Menlo, Consolas, monospace",
       theme: { background: '#101418' },
     });
@@ -54,6 +55,22 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
     // Single-flight adaptive polling: never start another IPC read before the
     // previous read has completed. Active output is sampled per frame; idle
     // sessions back off to reduce overhead.
+    let outputQueue: Uint8Array[] = [];
+    let outputFrame: number | undefined;
+    const flushOutput = () => {
+      outputFrame = undefined;
+      if (!outputQueue.length) return;
+      const length = outputQueue.reduce((total, value) => total + value.length, 0);
+      const merged = new Uint8Array(length);
+      let offset = 0;
+      outputQueue.forEach((value) => { merged.set(value, offset); offset += value.length; });
+      outputQueue = [];
+      term.write(merged);
+    };
+    const queueOutput = (value: Uint8Array) => {
+      outputQueue.push(value);
+      if (outputFrame === undefined) outputFrame = window.requestAnimationFrame(flushOutput);
+    };
     let polling = true;
     let readTimer: number | undefined;
     const wait = (delay: number) => new Promise<void>((resolve) => {
@@ -67,11 +84,12 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
           if (!polling) break;
           if (chunk.dataBase64) {
             idleRounds = 0;
-            term.write(decodeBase64(chunk.dataBase64));
+            queueOutput(decodeBase64(chunk.dataBase64));
           } else {
             idleRounds = Math.min(idleRounds + 1, 10);
           }
           if (chunk.closed) {
+            flushOutput();
             term.write('\r\n\x1b[33m[会话已关闭]\x1b[0m\r\n');
             polling = false;
             onClosedRef.current?.();
@@ -82,6 +100,7 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
         } catch {
           if (!polling) break;
           polling = false;
+          flushOutput();
           term.write('\r\n\x1b[31m[终端连接丢失]\x1b[0m\r\n');
           onClosedRef.current?.();
         }
@@ -99,6 +118,8 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
     return () => {
       polling = false;
       if (readTimer !== undefined) window.clearTimeout(readTimer);
+      if (outputFrame !== undefined) window.cancelAnimationFrame(outputFrame);
+      outputQueue = [];
       flushInput();
       observer.disconnect();
       dataDisposable.dispose();

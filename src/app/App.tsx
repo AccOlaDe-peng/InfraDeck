@@ -181,15 +181,20 @@ export default function App() {
   // ai.run.finished clears the bubble so the authoritative run state takes over.
   useEffect(() => {
     const unlisteners: Array<() => void> = [];
+    let disposed = false;
     void (async () => {
-      unlisteners.push(await listen<{ runId: string; delta?: string }>('ai.message.delta', (event) => {
+      const add = async <T,>(eventName: string, handler: (event: { payload: T }) => void) => {
+        const unlisten = await listen<T>(eventName, handler);
+        if (disposed) unlisten(); else unlisteners.push(unlisten);
+      };
+      await add<{ runId: string; delta?: string }>('ai.message.delta', (event) => {
         if (aiRunIdRef.current && event.payload.runId === aiRunIdRef.current && event.payload.delta) {
           setAiStreaming((current) => current + event.payload.delta);
         }
-      }));
-      unlisteners.push(await listen('ai.run.finished', () => setAiStreaming('')));
+      });
+      await add('ai.run.finished', () => setAiStreaming(''));
     })();
-    return () => unlisteners.forEach((fn) => fn());
+    return () => { disposed = true; unlisteners.splice(0).forEach((fn) => fn()); };
   }, []);
 
   // ---------------------------------------------------------------- servers

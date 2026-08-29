@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type DragEvent, type PointerEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { api, AppError } from '../../lib/tauri';
 import type { ConnectionDto, FileEntry, LocalFileEntry, ServerProfile, TransferJob } from '../../types/contracts';
@@ -26,19 +26,29 @@ export default function FilesView({ server, connection, peers, onNotify, onError
   const [queueFilter, setQueueFilter] = useState<'active' | 'completed' | 'failed'>('active');
   const [selected, setSelected] = useState<{ side: 'local' | 'remote'; path: string }>();
   const [localPanePercent, setLocalPanePercent] = useState(50);
+  const localPathRef = useRef(localPath);
+  const remotePathRef = useRef(remotePath);
+  localPathRef.current = localPath;
+  remotePathRef.current = remotePath;
 
   const loadRemote = async (path: string) => { setLoadingSide('remote'); try { setRemoteEntries(await api.fsList(connection.id, path)); setRemotePath(path); } catch (cause) { onError(errorText(cause)); } finally { setLoadingSide(undefined); } };
   const loadLocal = async (path?: string) => { setLoadingSide('local'); try { const target = path || localPath || await api.localFsHome(); setLocalEntries(await api.localFsList(target)); setLocalPath(target); } catch (cause) { onError(errorText(cause)); } finally { setLoadingSide(undefined); } };
 
   useEffect(() => { void loadRemote('/'); void loadLocal(); void api.fsTransfersList().then(setTransfers).catch(() => undefined); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [connection.id]);
   useEffect(() => {
+    let disposed = false;
     const off: Array<() => void> = [];
-    void (async () => {
-      off.push(await listen<TransferJob>('transfer.progress', ({ payload }) => setTransfers((items) => items.map((job) => job.transferId === payload.transferId ? { ...job, transferredBytes: payload.transferredBytes, speedBytesPerSec: payload.speedBytesPerSec } : job))));
-      off.push(await listen<TransferJob>('transfer.finished', ({ payload }) => { setTransfers((items) => items.map((job) => job.transferId === payload.transferId ? payload : job)); void loadRemote(remotePath); void loadLocal(localPath); }));
-      off.push(await listen<{ transferId: string; state: TransferJob['state'] }>('transfer.state', ({ payload }) => setTransfers((items) => items.map((job) => job.transferId === payload.transferId ? { ...job, state: payload.state } : job))));
-    })(); return () => off.forEach((fn) => fn());
-  }, [localPath, remotePath]);
+    const register = async <T,>(event: string, handler: (event: { payload: T }) => void) => {
+      const unlisten = await listen<T>(event, handler);
+      if (disposed) unlisten(); else off.push(unlisten);
+    };
+    void register<TransferJob>('transfer.progress', ({ payload }) => setTransfers((items) => items.map((job) => job.transferId === payload.transferId ? { ...job, transferredBytes: payload.transferredBytes, speedBytesPerSec: payload.speedBytesPerSec } : job)));
+    void register<TransferJob>('transfer.finished', ({ payload }) => { setTransfers((items) => items.map((job) => job.transferId === payload.transferId ? payload : job)); void loadRemote(remotePathRef.current); void loadLocal(localPathRef.current); });
+    void register<{ transferId: string; state: TransferJob['state'] }>('transfer.state', ({ payload }) => setTransfers((items) => items.map((job) => job.transferId === payload.transferId ? { ...job, state: payload.state } : job)));
+    return () => { disposed = true; off.splice(0).forEach((fn) => fn()); };
+    // These listeners are session-scoped; paths are read through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection.id]);
 
   const startTransfer = async (kind: 'upload' | 'download', local: string, remote: string) => { try { const job = await api.fsTransferStart({ kind, serverId: server.id, connectionId: connection.id, localPath: local, remotePath: remote, overwrite: true }); setTransfers((items) => [...items.filter((item) => item.transferId !== job.transferId), job]); setQueueFilter('active'); onNotify(kind === 'upload' ? '上传已开始。' : '下载已开始。'); } catch (cause) { onError(errorText(cause)); } };
   const getPayload = (event: DragEvent): DragPayload | undefined => { try { return JSON.parse(event.dataTransfer.getData(DRAG_TYPE)) as DragPayload; } catch { return undefined; } };
