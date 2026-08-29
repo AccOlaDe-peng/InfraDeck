@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::Mutex,
+    sync::{Mutex, Notify},
     time::{timeout, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -136,6 +136,7 @@ struct PtyHandle {
 struct PtyBuffer {
     data: Mutex<Vec<u8>>,
     closed: AtomicBool,
+    notify: Notify,
 }
 
 /// Keep at most the tail 128 KiB so a flood of output cannot exhaust memory.
@@ -151,9 +152,12 @@ async fn pty_reader(mut reader: ChannelReadHalf, buffer: Arc<PtyBuffer>) {
                 if overflow > 0 {
                     pending.drain(..overflow);
                 }
+                drop(pending);
+                buffer.notify.notify_waiters();
             }
             Some(ChannelMsg::Eof | ChannelMsg::Close) | None => {
                 buffer.closed.store(true, Ordering::SeqCst);
+                buffer.notify.notify_waiters();
                 break;
             }
             _ => {}
@@ -357,6 +361,7 @@ impl SshProvider for RusshProvider {
         let buffer = Arc::new(PtyBuffer {
             data: Mutex::new(Vec::new()),
             closed: AtomicBool::new(false),
+            notify: Notify::new(),
         });
         tokio::spawn(pty_reader(reader, Arc::clone(&buffer)));
         self.ptys.lock().await.insert(
@@ -482,6 +487,30 @@ impl SshProvider for RusshProvider {
             data,
             closed: handle.buffer.closed.load(Ordering::SeqCst),
         })
+    }
+
+    async fn pty_wait_output(&self, pty_id: &str) -> Result<super::PtyChunk, SshError> {
+        let handle = self
+            .ptys
+            .lock()
+            .await
+            .get(pty_id)
+            .cloned()
+            .ok_or(SshError::ConnectionNotFound)?;
+
+        loop {
+            {
+                let mut pending = handle.buffer.data.lock().await;
+                if !pending.is_empty() || handle.buffer.closed.load(Ordering::SeqCst) {
+                    let data = std::mem::take(&mut *pending);
+                    return Ok(super::PtyChunk {
+                        data,
+                        closed: handle.buffer.closed.load(Ordering::SeqCst),
+                    });
+                }
+            }
+            handle.buffer.notify.notified().await;
+        }
     }
 
     async fn pty_close(&self, pty_id: &str) -> Result<(), SshError> {

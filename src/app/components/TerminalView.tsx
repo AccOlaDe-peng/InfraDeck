@@ -11,7 +11,7 @@ function decodeBase64(value: string): Uint8Array {
   return bytes;
 }
 
-/** Renders one PTY session into an xterm.js surface with 60ms output polling. */
+/** Renders one PTY session into an xterm.js surface with a blocking PTY read. */
 export default function TerminalView({ sessionId, onClosed }: { sessionId: string; onClosed?: () => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const onClosedRef = useRef(onClosed);
@@ -52,9 +52,8 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
       else if (inputTimer === undefined) inputTimer = window.setTimeout(flushInput, 8);
     });
 
-    // Single-flight adaptive polling: never start another IPC read before the
-    // previous read has completed. Active output is sampled per frame; idle
-    // sessions back off to reduce overhead.
+    // Single-flight blocking read: the backend waits for PTY data instead of
+    // repeatedly sending empty IPC reads while the session is idle.
     let outputQueue: Uint8Array[] = [];
     let outputFrame: number | undefined;
     const flushOutput = () => {
@@ -72,21 +71,13 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
       if (outputFrame === undefined) outputFrame = window.requestAnimationFrame(flushOutput);
     };
     let polling = true;
-    let readTimer: number | undefined;
-    const wait = (delay: number) => new Promise<void>((resolve) => {
-      readTimer = window.setTimeout(resolve, delay);
-    });
     const readLoop = async () => {
-      let idleRounds = 0;
       while (polling) {
         try {
           const chunk = await api.terminalRead(sessionId);
           if (!polling) break;
           if (chunk.dataBase64) {
-            idleRounds = 0;
             queueOutput(decodeBase64(chunk.dataBase64));
-          } else {
-            idleRounds = Math.min(idleRounds + 1, 10);
           }
           if (chunk.closed) {
             flushOutput();
@@ -95,8 +86,6 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
             onClosedRef.current?.();
             break;
           }
-          const delay = document.hidden ? 100 : idleRounds < 2 ? 12 : idleRounds < 6 ? 24 : 48;
-          await wait(delay);
         } catch {
           if (!polling) break;
           polling = false;
@@ -117,7 +106,6 @@ export default function TerminalView({ sessionId, onClosed }: { sessionId: strin
 
     return () => {
       polling = false;
-      if (readTimer !== undefined) window.clearTimeout(readTimer);
       if (outputFrame !== undefined) window.cancelAnimationFrame(outputFrame);
       outputQueue = [];
       flushInput();

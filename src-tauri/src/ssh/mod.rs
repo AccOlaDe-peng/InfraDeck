@@ -158,6 +158,11 @@ pub trait SshProvider: Send + Sync {
     async fn pty_resize(&self, pty_id: &str, cols: u16, rows: u16) -> Result<(), SshError>;
     /// Drains buffered PTY output accumulated since the last call.
     async fn pty_take_output(&self, pty_id: &str) -> Result<PtyChunk, SshError>;
+    /// Waits until PTY output is available or the remote side closes.
+    /// Providers without an event-driven reader may fall back to a drain.
+    async fn pty_wait_output(&self, pty_id: &str) -> Result<PtyChunk, SshError> {
+        self.pty_take_output(pty_id).await
+    }
     async fn pty_close(&self, pty_id: &str) -> Result<(), SshError>;
     async fn fs_list(&self, connection_id: &str, path: &str) -> Result<Vec<FileEntry>, FtpError>;
     async fn fs_stat(&self, connection_id: &str, path: &str) -> Result<FileEntry, FtpError>;
@@ -658,6 +663,14 @@ impl<P: SshProvider> SshManager<P> {
             Self::resolve_pty(&sessions, session_id)?.to_owned()
         };
         self.provider.pty_take_output(&pty_id).await
+    }
+
+    pub async fn terminal_read_wait(&self, session_id: &str) -> Result<PtyChunk, SshError> {
+        let pty_id = {
+            let sessions = self.terminal_sessions.lock().await;
+            Self::resolve_pty(&sessions, session_id)?.to_owned()
+        };
+        self.provider.pty_wait_output(&pty_id).await
     }
 
     pub async fn terminal_close(&self, session_id: &str) -> Result<(), SshError> {

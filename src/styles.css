@@ -779,3 +779,162 @@ footer { margin-top: 22px; color: var(--text-dim); font-size: 11px; }.text-butto
 .audit-detail pre { overflow: auto; max-height: 260px; border: 1px solid var(--border); border-radius: 5px; padding: 8px; color: var(--text-mid); background: var(--bg-terminal); font-size: 9px; }
 .audit-outcome { color: var(--ok); } .audit-outcome.denied, .audit-outcome.failed { color: var(--danger); }
 .audit-modal-shell { width: min(1180px, calc(100vw - 36px)); height: min(760px, calc(100vh - 36px)); overflow: hidden; border: 1px solid var(--border); border-radius: 8px; }
+
+/* Readable desktop type scale: keep the compact layout while avoiding 8–10px UI text. */
+.topbar-windows .topbar-btn { font-size: 12px; }
+.topbar-windows .topbar-icon { font-size: 14px; }
+.topbar-menu button { font-size: 13px; }
+.tab { font-size: 12px; }
+.sidebar-title { font-size: 15px; }
+.sidebar-search-row .sidebar-search { font-size: 12px; }
+.connection-sidebar .group-label { font-size: 12px; }
+.connection-sidebar .group-label small { font-size: 10px; }
+.connection-sidebar .server-row-main strong { font-size: 13px; }
+.connection-sidebar .server-row-main span { font-size: 11px; }
+.connection-context-menu header strong { font-size: 12px; }
+.connection-context-menu header small { font-size: 10px; }
+.connection-context-menu button { font-size: 11px; }
+.connection-context-menu kbd { font-size: 9px; }
+.home-dashboard-windows .home-intro h1 { font-size: 24px; }
+.home-dashboard-windows .home-intro > div > p:last-child { font-size: 12px; }
+.home-metrics small { font-size: 11px; }
+.home-card-heading span { font-size: 13px; }
+.home-card-heading small { font-size: 11px; }
+.recent-server strong { font-size: 12px; }
+.recent-server small { font-size: 10px; }
+.home-actions > button strong { font-size: 12px; }
+.home-actions > button small, .home-actions > button b { font-size: 10px; }
+.home-ai-note strong { font-size: 12px; }
+.home-ai-note p { font-size: 11px; }
+.home-activity-heading { font-size: 13px; }
+.activity-filters button { font-size: 11px; }
+.activity-empty p { font-size: 12px; }
+.connection-form-single .connection-form-header h3 { font-size: 15px; }
+.connection-form-single .connection-form-header p { font-size: 11px; }
+.connection-form-single .form-section-heading span { font-size: 12px; }
+.connection-form-single .form-section-heading small { font-size: 10px; }
+.connection-form-single label { font-size: 11px; }
+.connection-form-single input, .connection-form-single select { font-size: 12px; }
+.connection-form-single .auth-kind-grid button strong { font-size: 11px; }
+.connection-form-single .auth-kind-grid button small { font-size: 10px; }
+.connection-form-single .auth-explainer, .connection-form-single .advanced-note { font-size: 10px; }
+.connection-form-single .connection-form-footer > span { font-size: 10px; }
+.connection-form-single .connection-form-footer button { font-size: 11px; }
+.files-toolbar, .file-row { font-size: 13px; }
+.file-size, .file-mode { font-size: 12px; }
+.transfer-row, .transfer-table-row { font-size: 12px; }
+.queue-progress small { font-size: 10px; }
+.ai-panel, .ai-connection-card, .system-overview, .ai-suggestions { font-size: 12px; }
+.ai-connection-card b { font-size: 14px; }
+.ai-context-label { font-size: 11px; }
+.ai-context-select select { font-size: 12px; }
+.ai-suggestions button { font-size: 11px; }
+.monitor-metrics span { font-size: 11px; }
+.monitor-tabs button { font-size: 12px; }
+.container-toolbar, .container-row { font-size: 13px; }
+.container-toolbar label { font-size: 12px; }
+.container-id, .container-status { font-size: 12px; }
+.state-badge { font-size: 11px; }
+.audit-titlebar p { font-size: 11px; }
+.audit-titlebar button, .audit-filters button { font-size: 11px; }
+.audit-filters input, .audit-filters select { font-size: 11px; }
+.audit-table-head, .audit-table-body > button { font-size: 11px; }
+.audit-table footer { font-size: 11px; }
+.audit-detail h3 { font-size: 13px; }
+.audit-detail h4 { font-size: 12px; }
+.audit-detail dl, .audit-detail pre { font-size: 11px; }
+.statusbar { font-size: 10px; }
+
+/* Keep the empty/home workspace visually centered in the available canvas. */
+.home-dashboard {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.home-inner {
+  margin: 0;
+  padding-top: 24px;
+  padding-bottom: 24px;
+}
+.home-dashboard-windows .home-inner {
+  padding-top: 24px;
+  padding-bottom: 24px;
+}
+
+/* Slightly more readable operation typography without expanding the chrome. */
+.home-dashboard-windows .home-intro h1 { font-size: 26px; }
+.home-dashboard-windows .home-intro > div > p:last-child { font-size: 13px; }
+.home-dashboard-windows .home-card-heading span { font-size: 14px; }
+.home-dashboard-windows .home-card-heading small { font-size: 12px; }
+.home-dashboard-windows .recent-server strong,
+.home-dashboard-windows .home-actions > button strong { font-size: 13px; }
+.home-dashboard-windows .recent-server small,
+.home-dashboard-windows .home-actions > button small,
+.home-dashboard-windows .home-actions > button b { font-size: 11px; }
+.home-dashboard-windows .home-ai-note strong { font-size: 13px; }
+.home-dashboard-windows .home-ai-note p { font-size: 12px; }
+.home-dashboard-windows .home-footer { font-size: 10px; }
+
+@media (max-width: 640px) {
+  .home-dashboard { align-items: flex-start; }
+  .home-inner, .home-dashboard-windows .home-inner { padding-top: 32px; }
+}
+
+/* Give the Windows overview more breathing room while preserving its centered canvas. */
+.home-dashboard-windows .home-inner {
+  width: min(900px, calc(100% - 64px));
+}
+.home-dashboard-windows .home-metrics {
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.home-dashboard-windows .home-metrics article {
+  min-height: 76px;
+  padding: 13px 16px;
+}
+.home-dashboard-windows .home-metrics strong { font-size: 21px; }
+.home-dashboard-windows .home-content-grid { gap: 14px; }
+.home-dashboard-windows .home-card { min-height: 238px; }
+.home-dashboard-windows .home-card-heading {
+  min-height: 48px;
+  padding-inline: 14px;
+}
+.home-dashboard-windows .home-zero { height: 189px; }
+.home-dashboard-windows .recent-list { padding: 10px; }
+.home-dashboard-windows .recent-server {
+  min-height: 50px;
+  padding: 8px 10px;
+}
+.home-dashboard-windows .home-actions > button {
+  width: calc(100% - 18px);
+  margin: 8px 9px 0;
+  padding: 10px;
+}
+.home-dashboard-windows .home-actions > button i {
+  width: 32px;
+  height: 32px;
+}
+.home-dashboard-windows .home-ai-note {
+  min-height: 68px;
+  margin-top: 12px;
+  padding: 12px 16px;
+}
+
+/* Error and operation feedback should remain readable at a glance. */
+.banner {
+  font-size: 14px;
+  line-height: 1.5;
+}
+.toast-host {
+  width: min(360px, calc(100vw - 28px));
+  padding: 11px 10px 11px 11px;
+}
+.toast-host strong { font-size: 13px; }
+.toast-host p {
+  max-height: 110px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.toast-mark { width: 24px; height: 24px; font-size: 12px; }
+.ai-run-error { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.connection-test-result { font-size: 12px; }

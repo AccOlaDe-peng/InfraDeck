@@ -179,7 +179,7 @@ pub async fn terminal_read(
 ) -> Result<TerminalReadDto, AppError> {
     let chunk = state
         .ssh
-        .terminal_read(&session_id)
+        .terminal_read_wait(&session_id)
         .await
         .map_err(AppError::from)?;
     Ok(TerminalReadDto {

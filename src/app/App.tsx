@@ -263,17 +263,15 @@ export default function App() {
   // --------------------------------------------------------------- terminals
 
   const openTerminalFor = async (item: ServerProfile) => {
-    if (tabs.some((tab) => tab.serverId === item.id && !tab.closed)) {
-      const existing = tabs.find((tab) => tab.serverId === item.id)?.id;
-      setActiveTabId(existing);
-      if (existing) setActivePane({ kind: 'terminal', id: existing });
-      return;
-    }
     setBusyServerId(item.id);
     try {
       const connection = await ensureConnected(item);
       const session = await api.openTerminal(connection.id, { terminalType: 'xterm-256color', cols: 80, rows: 24, env: {} });
-      const tab: TerminalTab = { id: crypto.randomUUID(), serverId: item.id, title: `${item.name}`, sessionId: session.sessionId };
+      // A connection can have multiple independent PTY sessions. Keep the
+      // first title clean and disambiguate subsequent tabs like Xshell/Putty.
+      const sameServerCount = tabs.filter((tab) => tab.serverId === item.id).length;
+      const title = sameServerCount === 0 ? item.name : `${item.name} (${sameServerCount})`;
+      const tab: TerminalTab = { id: crypto.randomUUID(), serverId: item.id, title, sessionId: session.sessionId };
       setTabs((current) => [...current, tab]);
       setActiveTabId(tab.id);
       setActivePane({ kind: 'terminal', id: tab.id });
