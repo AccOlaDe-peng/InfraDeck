@@ -265,8 +265,21 @@ export default function App() {
   const openTerminalFor = async (item: ServerProfile) => {
     setBusyServerId(item.id);
     try {
-      const connection = await ensureConnected(item);
-      const session = await api.openTerminal(connection.id, { terminalType: 'xterm-256color', cols: 80, rows: 24, env: {} });
+      const options = { terminalType: 'xterm-256color', cols: 80, rows: 24, env: {} } as const;
+      let connection = await ensureConnected(item);
+      let session;
+      try {
+        session = await api.openTerminal(connection.id, options);
+      } catch (cause) {
+        // A long-idle SSH connection can remain marked as connected while its
+        // transport has already gone away. Reconnect once before surfacing the
+        // PTY/channel error to the user.
+        const message = errorMessage(cause);
+        if (!/Channel send error|open PTY|connection not found|connection is not active/i.test(message)) throw cause;
+        connection = await api.reconnect(item.id);
+        setConnections((current) => ({ ...current, [item.id]: connection }));
+        session = await api.openTerminal(connection.id, options);
+      }
       // A connection can have multiple independent PTY sessions. Keep the
       // first title clean and disambiguate subsequent tabs like Xshell/Putty.
       const sameServerCount = tabs.filter((tab) => tab.serverId === item.id).length;
@@ -295,7 +308,17 @@ export default function App() {
     setBusyServerId(item.id);
     try {
       if (connections[item.id]) await api.disconnect(connections[item.id].id);
-      for (const tab of tabs.filter((candidate) => candidate.serverId === item.id)) await closeTab(tab.id);
+      // disconnect() already closes every PTY owned by this connection. Only
+      // remove the corresponding UI tabs here; do not issue terminal_close a
+      // second time for sessions the backend has already forgotten.
+      const removedTabIds = new Set(tabs.filter((tab) => tab.serverId === item.id).map((tab) => tab.id));
+      setTabs((current) => current.filter((tab) => tab.serverId !== item.id));
+      if (activeTabId && removedTabIds.has(activeTabId)) {
+        setActiveTabId(undefined);
+        setActivePane((pane) => pane?.kind === 'terminal' && removedTabIds.has(pane.id)
+          ? (openViews[0] ? { kind: openViews[0] } : undefined)
+          : pane);
+      }
       await api.deleteServerProfile(item.id);
       setProfiles((current) => current.filter((candidate) => candidate.id !== item.id));
       setConnections((current) => { const next = { ...current }; delete next[item.id]; return next; });

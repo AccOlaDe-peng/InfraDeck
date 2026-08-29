@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -754,9 +755,11 @@ impl<P: SshProvider> SshManager<P> {
             }
             owned.into_iter().map(|(_, pty_id)| pty_id).collect()
         };
-        for pty_id in ptys {
-            let _ = self.provider.pty_close(&pty_id).await;
-        }
+        let provider = &self.provider;
+        let close_futures = ptys.into_iter().map(|pty_id| async move {
+            provider.pty_close(&pty_id).await
+        });
+        let _ = join_all(close_futures).await;
     }
 
     pub async fn connect(
@@ -798,7 +801,13 @@ impl<P: SshProvider> SshManager<P> {
             registry.remove(id).ok_or(SshError::ConnectionNotFound)?
         };
         transition(&mut dto, ConnectionState::Disconnecting)?;
-        self.provider.disconnect(provider_connection).await?;
+        // The registry entry has already been removed and all terminal
+        // sessions have been forgotten. If the transport is already broken,
+        // russh may fail while sending the final disconnect packet; cleanup
+        // must still be considered complete so reconnect can proceed.
+        if let Err(error) = self.provider.disconnect(provider_connection).await {
+            tracing::warn!(error = %error, connection_id = %id, "SSH transport was already closed during disconnect");
+        }
         transition(&mut dto, ConnectionState::Disconnected)?;
         Ok(dto)
     }

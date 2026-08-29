@@ -40,6 +40,9 @@ function samePane(a: WorkspacePane, b: WorkspacePane): boolean {
 export default function WorkspaceTabs(props: Props) {
   const active = props.activePane;
   const activeTab = active?.kind === 'terminal' ? props.tabs.find((tab) => tab.id === active.id) : undefined;
+  // In terminal + embedded-files mode the file pane already has its own
+  // heading below the terminal. Do not render a second file tab above it.
+  const visibleViews = props.openViews.filter((view) => !(active?.kind === 'terminal' && view === 'files'));
   return (
     <div className="tab-strip">
       {props.tabs.map((tab) => (
@@ -58,7 +61,7 @@ export default function WorkspaceTabs(props: Props) {
           <button className="tab-close" onClick={(event) => { event.stopPropagation(); props.onCloseTerminal(tab.id); }}>×</button>
         </div>
       ))}
-      {props.openViews.map((view) => (
+      {visibleViews.map((view) => (
         <div
           key={view}
           className={`tab tab-view ${active?.kind === view ? 'active' : ''}`}
