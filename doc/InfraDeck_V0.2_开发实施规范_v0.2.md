@@ -15,6 +15,11 @@
 - 错误模型不变：`AppErrorDto { code, message, retryable, category, details }`；新增 category `fs`。
 - 日志 target 约定：`infradeck::fs`、`infradeck::docker`、`infradeck::conversation`。
 - Rust 校验链不变：`cargo fmt --check` / `cargo test` / `cargo clippy --tests -- -D warnings`；前端 `pnpm typecheck` / `pnpm test` / `pnpm build`。
+- 新建/编辑连接中的“测试连接”仅执行目标 `host:port` 的 TCP 连通性探测，不进入 SSH 握手、Host Key 校验或用户认证；首次 Host Key 确认只允许出现在用户发起正式 SSH 连接时。
+- 删除 Server Profile 由后端按 `serverId` 统一处理：若存在活动 SSH 连接，先关闭其 PTY 与连接，再删除持久化记录；不存在活动连接时直接删除，不依赖前端缓存的 `connectionId`。
+- 所有正式连接入口（连接、打开终端、文件传输、系统监控、重新连接）收到 `SSH_HOST_KEY_REQUIRED` 时必须展示应用内 Host Key 确认对话框；信任后恢复用户原始操作。删除连接使用应用内确认对话框，不依赖 WebView 原生 `window.confirm`。
+- SFTP 命令接收公开的 `connectionId`，`SshManager` 必须在调用 Provider 前解析为对应的内部 transport id；列表、状态、新建、重命名、删除、分块读写及传输统一经过该映射。
+- 创建 SFTP 会话时必须先打开 SSH session channel，并以 `want_reply=true` 请求 `sftp` subsystem，成功后才能初始化 SFTP 协议会话；只有服务器拒绝 subsystem 请求时映射为 `FS_SFTP_UNSUPPORTED`，channel 或协议初始化错误映射为可诊断的 `FS_TRANSFER_FAILED`。
 
 ---
 

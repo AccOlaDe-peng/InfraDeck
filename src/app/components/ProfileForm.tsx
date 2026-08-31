@@ -75,36 +75,18 @@ export default function ProfileForm({ editing, onClose, onSaved, onNotify, onErr
 
   const testConnection = async () => {
     setTestResult(undefined);
-    if (!profile.host.trim() || !profile.username.trim()) {
-      setTestResult({ ok: false, text: '请填写主机地址和用户名' });
+    if (!profile.host.trim()) {
+      setTestResult({ ok: false, text: '请填写主机地址' });
       return;
-    }
-    let auth: AuthRef = { kind: 'agent' };
-    if (authKind === 'password') {
-      const credentialId = profile.auth.kind === 'password' ? profile.auth.credentialId : crypto.randomUUID();
-      if (!secret && profile.auth.kind !== 'password') {
-        setTestResult({ ok: false, text: '请输入 SSH 密码' });
-        return;
-      }
-      auth = { kind: 'password', credentialId };
-    } else if (authKind === 'privateKey') {
-      if (!keyPath.trim()) {
-        setTestResult({ ok: false, text: '请输入私钥路径' });
-        return;
-      }
-      auth = { kind: 'privateKey', keyPath: keyPath.trim() };
     }
     setTesting(true);
     try {
       const result = await api.testServerConnection({
-        profile: { ...profile, name: profile.name.trim() || '连接测试', host: profile.host.trim(), username: profile.username.trim(), port: Number(profile.port), auth },
-        ...(secret ? { secret } : {}),
+        profile: { ...profile, name: profile.name.trim() || '连接测试', host: profile.host.trim(), port: Number(profile.port) },
       });
       setTestResult({
         ok: result.reachable,
-        text: result.reachable
-          ? `连接成功${result.serverVersion ? ` · ${result.serverVersion}` : ''}`
-          : '目标不可达',
+        text: result.reachable ? '主机端口可达' : '主机端口不可达',
       });
     } catch (cause) {
       setTestResult({ ok: false, text: cause instanceof AppError ? cause.message : cause instanceof Error ? cause.message : String(cause) });

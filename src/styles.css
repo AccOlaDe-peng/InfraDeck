@@ -120,6 +120,11 @@ button { cursor: pointer; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--bg-raise); }
 .modal-footer .primary-button { width: auto; min-width: 132px; padding: 8px 14px; border-radius: 4px; }
 .modal-footer .small-button { padding: 8px 14px; border-radius: 4px; }
+.hostkey-dialog, .confirm-dialog { width: min(500px, 100%); padding-bottom: 0; }
+.hostkey-dialog > p:not(.eyebrow), .confirm-dialog > p { margin: 10px 0 16px; color: var(--text-dim); font-size: 12px; line-height: 1.55; }
+.hostkey-details { display: grid; gap: 7px; border: 1px solid var(--warn-border); border-radius: 5px; padding: 11px; color: var(--warn-dim); background: var(--warn-bg); font-size: 11px; }
+.hostkey-details code { color: var(--warn); font-size: 11px; overflow-wrap: anywhere; }
+.hostkey-dialog .modal-footer, .confirm-dialog .modal-footer { margin: 18px -18px 0; }
 .palette-backdrop { align-items: start; padding-top: 12vh; }
 .palette { width: min(560px, 100%); padding: 8px; }
 .palette-input { margin: 0 0 10px; }
@@ -746,6 +751,9 @@ footer { margin-top: 22px; color: var(--text-dim); font-size: 11px; }.text-butto
 .connection-test-result.success { color: var(--ok); }
 .connection-test-result.failed { color: var(--danger); }
 .connection-test-result.success i, .connection-test-result.failed i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.file-load-error { gap: 8px; color: var(--danger); }
+.file-load-error span { max-width: 90%; overflow-wrap: anywhere; }
+.file-load-error button { border: 1px solid var(--danger-border); border-radius: 4px; padding: 4px 9px; color: var(--danger); background: var(--danger-bg); }
 
 @media (max-height: 650px) {
   .connection-form-single { max-height: calc(100vh - 10px); }

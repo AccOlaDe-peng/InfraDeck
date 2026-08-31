@@ -24,7 +24,14 @@ import HomeActivityPanel from './components/HomeActivityPanel';
 import { isMac } from '../lib/platform';
 import SidebarResizeHandle from './components/SidebarResizeHandle';
 
-type HostKeyPrompt = { serverId: string; host: string; port: number; algorithm: string; fingerprintSha256: string };
+type HostKeyPrompt = {
+  serverId: string;
+  host: string;
+  port: number;
+  algorithm: string;
+  fingerprintSha256: string;
+  resume: 'connect' | 'terminal' | 'files' | 'containers';
+};
 
 function errorMessage(error: unknown): string {
   if (error instanceof AppError) {
@@ -87,6 +94,7 @@ export default function App() {
 
   const [banner, setBanner] = useState<{ kind: 'error' | 'success'; text: string }>();
   const [hostKeyPrompt, setHostKeyPrompt] = useState<HostKeyPrompt>();
+  const [deletePrompt, setDeletePrompt] = useState<ServerProfile>();
   const [userApproval, setUserApproval] = useState<ApprovalRequest>();
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([]);
 
@@ -208,6 +216,27 @@ export default function App() {
     return connection;
   };
 
+  const captureHostKey = (
+    cause: unknown,
+    item: ServerProfile,
+    resume: HostKeyPrompt['resume'],
+  ): boolean => {
+    if (!(cause instanceof AppError) || cause.dto.code !== 'SSH_HOST_KEY_REQUIRED') return false;
+    const details = cause.dto.details ?? {};
+    if (typeof details.host !== 'string' || typeof details.port !== 'number'
+      || typeof details.algorithm !== 'string' || typeof details.fingerprintSha256 !== 'string') return false;
+    setHostKeyPrompt({
+      serverId: item.id,
+      host: details.host,
+      port: details.port,
+      algorithm: details.algorithm,
+      fingerprintSha256: details.fingerprintSha256,
+      resume,
+    });
+    setBanner(undefined);
+    return true;
+  };
+
   const connect = async (item: ServerProfile) => {
     setBusyServerId(item.id);
     try {
@@ -221,13 +250,7 @@ export default function App() {
       const connection = await ensureConnected(item);
       notify(`已连接「${connection.state === 'connected' ? item.name : item.name}」。`);
     } catch (cause) {
-      if (cause instanceof AppError && cause.dto.code === 'SSH_HOST_KEY_REQUIRED') {
-        const details = cause.dto.details ?? {};
-        if (typeof details.host === 'string' && typeof details.port === 'number' && typeof details.algorithm === 'string' && typeof details.fingerprintSha256 === 'string') {
-          setHostKeyPrompt({ serverId: item.id, host: details.host, port: details.port, algorithm: details.algorithm, fingerprintSha256: details.fingerprintSha256 });
-        }
-      }
-      setBanner({ kind: 'error', text: errorMessage(cause) });
+      if (!captureHostKey(cause, item, 'connect')) setBanner({ kind: 'error', text: errorMessage(cause) });
     } finally { setBusyServerId(undefined); }
   };
 
@@ -256,7 +279,9 @@ export default function App() {
       setConnections((current) => ({ ...current, [item.id]: connection }));
       setSelectedServerId(item.id);
       notify(`已重新连接「${item.name}」。`);
-    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    } catch (cause) {
+      if (!captureHostKey(cause, item, 'connect')) setBanner({ kind: 'error', text: errorMessage(cause) });
+    }
     finally { setBusyServerId(undefined); }
   };
 
@@ -289,7 +314,9 @@ export default function App() {
       setActiveTabId(tab.id);
       setActivePane({ kind: 'terminal', id: tab.id });
       setSelectedServerId(item.id);
-    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    } catch (cause) {
+      if (!captureHostKey(cause, item, 'terminal')) setBanner({ kind: 'error', text: errorMessage(cause) });
+    }
     finally { setBusyServerId(undefined); }
   };
 
@@ -299,18 +326,20 @@ export default function App() {
       await ensureConnected(item);
       setSelectedServerId(item.id);
       openView(view);
-    } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
+    } catch (cause) {
+      if (!captureHostKey(cause, item, view)) setBanner({ kind: 'error', text: errorMessage(cause) });
+    }
     finally { setBusyServerId(undefined); }
   };
 
   const deleteServer = async (item: ServerProfile) => {
-    if (!window.confirm(`删除连接“${item.name}”？此操作不会删除远端数据。`)) return;
+    setDeletePrompt(undefined);
     setBusyServerId(item.id);
     try {
-      if (connections[item.id]) await api.disconnect(connections[item.id].id);
-      // disconnect() already closes every PTY owned by this connection. Only
-      // remove the corresponding UI tabs here; do not issue terminal_close a
-      // second time for sessions the backend has already forgotten.
+      const deleted = await api.deleteServerProfile(item.id);
+      if (!deleted) throw new Error('连接不存在或已被删除，请刷新连接列表。');
+      // Deletion closes any active backend connection and its PTYs. Only
+      // remove the corresponding UI state here.
       const removedTabIds = new Set(tabs.filter((tab) => tab.serverId === item.id).map((tab) => tab.id));
       setTabs((current) => current.filter((tab) => tab.serverId !== item.id));
       if (activeTabId && removedTabIds.has(activeTabId)) {
@@ -319,7 +348,6 @@ export default function App() {
           ? (openViews[0] ? { kind: openViews[0] } : undefined)
           : pane);
       }
-      await api.deleteServerProfile(item.id);
       setProfiles((current) => current.filter((candidate) => candidate.id !== item.id));
       setConnections((current) => { const next = { ...current }; delete next[item.id]; return next; });
       if (selectedServerId === item.id) setSelectedServerId(undefined);
@@ -432,8 +460,12 @@ export default function App() {
     try {
       await api.hostKeyResolve({ ...hostKeyPrompt, decision });
       const server = profiles.find((item) => item.id === hostKeyPrompt.serverId);
+      const resume = hostKeyPrompt.resume;
       setHostKeyPrompt(undefined);
-      if (decision !== 'reject' && server) await connect(server);
+      if (decision === 'reject' || !server) return;
+      if (resume === 'terminal') await openTerminalFor(server);
+      else if (resume === 'files' || resume === 'containers') await openServerView(server, resume);
+      else await connect(server);
     } catch (cause) { setBanner({ kind: 'error', text: errorMessage(cause) }); }
   };
 
@@ -530,19 +562,34 @@ export default function App() {
       />
 
       {hostKeyPrompt && (
-        <section className="hostkey-card">
-          <div>
+        <div className="modal-backdrop" role="presentation">
+          <section className="modal hostkey-dialog" role="dialog" aria-modal="true" aria-labelledby="hostkey-title">
             <p className="eyebrow">HOST KEY VERIFICATION</p>
-            <h3>首次连接需要确认服务器指纹</h3>
-            <p>{hostKeyPrompt.host}:{hostKeyPrompt.port} · {hostKeyPrompt.algorithm}</p>
-            <code>{hostKeyPrompt.fingerprintSha256}</code>
-          </div>
-          <div className="hostkey-actions">
-            <button className="small-button" onClick={() => void resolveHostKey('trustOnce')}>仅本次信任</button>
-            <button className="small-button connect" onClick={() => void resolveHostKey('trustAndSave')}>信任并保存</button>
-            <button className="small-button danger" onClick={() => void resolveHostKey('reject')}>拒绝</button>
-          </div>
-        </section>
+            <h3 id="hostkey-title">首次连接需要确认服务器指纹</h3>
+            <p>请通过可信渠道核对指纹后再选择是否信任。</p>
+            <div className="hostkey-details">
+              <span>{hostKeyPrompt.host}:{hostKeyPrompt.port} · {hostKeyPrompt.algorithm}</span>
+              <code>{hostKeyPrompt.fingerprintSha256}</code>
+            </div>
+            <div className="modal-footer hostkey-actions">
+              <button className="small-button danger" onClick={() => void resolveHostKey('reject')}>拒绝</button>
+              <button className="small-button" onClick={() => void resolveHostKey('trustOnce')}>仅本次信任</button>
+              <button className="primary-button" onClick={() => void resolveHostKey('trustAndSave')}>信任并保存</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {deletePrompt && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setDeletePrompt(undefined)}>
+          <section className="modal confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-server-title" onClick={(event) => event.stopPropagation()}>
+            <h3 id="delete-server-title">删除连接“{deletePrompt.name}”？</h3>
+            <p>将删除本机保存的连接配置，不会删除或修改远端服务器数据。</p>
+            <div className="modal-footer">
+              <button className="small-button" onClick={() => setDeletePrompt(undefined)}>取消</button>
+              <button className="small-button danger" onClick={() => void deleteServer(deletePrompt)}>删除连接</button>
+            </div>
+          </section>
+        </div>
       )}
       {/* 工具审批内联在 AI 面板（dbx 式：不打断、可忽略、留痕）；收起时窄栏圆点提醒 */}
 
@@ -563,7 +610,7 @@ export default function App() {
           onReconnect={(item) => void reconnect(item)}
           onEdit={(item) => { setEditingProfile(item); setShowProfileForm(true); }}
           onDuplicate={(item) => { setEditingProfile({ ...item, id: crypto.randomUUID(), name: `${item.name} 副本` }); setShowProfileForm(true); }}
-          onDelete={(item) => void deleteServer(item)}
+          onDelete={setDeletePrompt}
           onAdd={() => { setEditingProfile(undefined); setShowProfileForm(true); }}
           onRefresh={() => void refresh()}
         />

@@ -37,7 +37,7 @@ export const api = {
   deleteServerProfile: (serverId: string) => call<boolean>('server_profile_delete', { serverId }),
   saveServerProfile: (profile: ServerProfileInput) =>
     call<ServerProfile>('server_profile_save', { input: profile }),
-  testServerConnection: (input: { profile: ServerProfileInput; secret?: string }) =>
+  testServerConnection: (input: { profile: ServerProfileInput }) =>
     call<{ reachable: boolean; remoteAddress?: string; serverVersion?: string; authenticatedBy?: string }>('server_connection_test', { input }),
   setCredential: (credentialId: string | undefined, secret: string) =>
     call<{ credentialId: string; exists: boolean }>('credential_set', { input: { credentialId, secret } }),

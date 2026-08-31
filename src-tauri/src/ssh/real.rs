@@ -201,10 +201,14 @@ impl RusshProvider {
         let channel = handle
             .channel_open_session()
             .await
+            .map_err(|error| FtpError::Transfer(format!("open SFTP channel: {error}")))?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
             .map_err(|_| FtpError::Unsupported)?;
         let session = SftpSession::new(channel.into_stream())
             .await
-            .map_err(|_| FtpError::Unsupported)?;
+            .map_err(|error| FtpError::Transfer(format!("initialize SFTP session: {error}")))?;
         let session = Arc::new(session);
         self.sftp_sessions
             .lock()

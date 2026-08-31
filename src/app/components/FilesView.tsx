@@ -19,6 +19,7 @@ function formatSpeed(bytes = 0) { return bytes >= 1 << 20 ? `${(bytes / (1 << 20
 export default function FilesView({ server, connection, peers, onNotify, onError }: Props) {
   const [remotePath, setRemotePath] = useState('/');
   const [remoteEntries, setRemoteEntries] = useState<FileEntry[]>([]);
+  const [remoteError, setRemoteError] = useState<string>();
   const [localPath, setLocalPath] = useState('');
   const [localEntries, setLocalEntries] = useState<LocalFileEntry[]>([]);
   const [loadingSide, setLoadingSide] = useState<'local' | 'remote'>();
@@ -31,7 +32,7 @@ export default function FilesView({ server, connection, peers, onNotify, onError
   localPathRef.current = localPath;
   remotePathRef.current = remotePath;
 
-  const loadRemote = async (path: string) => { setLoadingSide('remote'); try { setRemoteEntries(await api.fsList(connection.id, path)); setRemotePath(path); } catch (cause) { onError(errorText(cause)); } finally { setLoadingSide(undefined); } };
+  const loadRemote = async (path: string) => { setLoadingSide('remote'); setRemoteError(undefined); try { setRemoteEntries(await api.fsList(connection.id, path)); setRemotePath(path); } catch (cause) { const message = errorText(cause); setRemoteEntries([]); setRemoteError(message); onError(message); } finally { setLoadingSide(undefined); } };
   const loadLocal = async (path?: string) => { setLoadingSide('local'); try { const target = path || localPath || await api.localFsHome(); setLocalEntries(await api.localFsList(target)); setLocalPath(target); } catch (cause) { onError(errorText(cause)); } finally { setLoadingSide(undefined); } };
 
   useEffect(() => { void loadRemote('/'); void loadLocal(); void api.fsTransfersList().then(setTransfers).catch(() => undefined); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [connection.id]);
@@ -76,7 +77,7 @@ export default function FilesView({ server, connection, peers, onNotify, onError
       <section className="file-pane" onDragOver={(event) => event.preventDefault()} onDrop={(event) => dropRemote(event)}>
         <header className="file-pane-title"><b>远程文件</b><span className="server-chip"><i />{server.name}</span></header>
         <div className="file-pane-controls"><button title="上一级" onClick={() => void loadRemote(parentPath(remotePath, true))}>←</button><button title="刷新" disabled={loadingSide === 'remote'} onClick={() => void loadRemote(remotePath)}>↻</button><div className="path-field">{remotePath}</div><button onClick={() => void mkdir()}>＋ 新建目录</button></div>
-        <div className="dual-file-header"><span>名称</span><span>大小</span><span>修改时间</span><span>权限</span></div><div className="dual-file-list">{remoteRows}{!remoteEntries.length && <div className="file-empty">空目录</div>}</div>
+        <div className="dual-file-header"><span>名称</span><span>大小</span><span>修改时间</span><span>权限</span></div><div className="dual-file-list">{remoteRows}{loadingSide === 'remote' && !remoteEntries.length && <div className="file-empty">正在加载远程目录…</div>}{remoteError && <div className="file-empty file-load-error"><span>{remoteError}</span><button onClick={() => void loadRemote(remotePath)}>重试</button></div>}{!loadingSide && !remoteError && !remoteEntries.length && <div className="file-empty">空目录</div>}</div>
       </section>
     </div>
     <section className="transfer-queue"><header><b>传输队列</b><button className={queueFilter === 'active' ? 'active' : ''} onClick={() => setQueueFilter('active')}>队列 {transfers.filter((item) => ['queued', 'running', 'paused'].includes(item.state)).length}</button><button className={queueFilter === 'completed' ? 'active' : ''} onClick={() => setQueueFilter('completed')}>成功</button><button className={queueFilter === 'failed' ? 'active' : ''} onClick={() => setQueueFilter('failed')}>失败</button><span /><button onClick={() => setTransfers((items) => items.filter((item) => !['completed', 'failed', 'cancelled'].includes(item.state)))}>清除已完成</button></header>

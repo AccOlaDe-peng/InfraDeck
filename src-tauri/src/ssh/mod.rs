@@ -685,18 +685,34 @@ impl<P: SshProvider> SshManager<P> {
         self.provider.pty_close(&pty_id).await
     }
 
+    /// UI/API calls use the manager's public connection id, while providers
+    /// keep their own transport id. Resolve that boundary before every SFTP
+    /// operation. The fallback preserves direct provider-style calls used by
+    /// isolated filesystem tests.
+    async fn provider_fs_connection_id(&self, connection_id: &str) -> String {
+        self.registry
+            .lock()
+            .await
+            .get(connection_id)
+            .map(|(_, connection)| connection.id.clone())
+            .unwrap_or_else(|| connection_id.to_owned())
+    }
+
     pub async fn fs_list(
         &self,
         connection_id: &str,
         path: &str,
     ) -> Result<Vec<FileEntry>, FtpError> {
-        self.provider.fs_list(connection_id, path).await
+        let provider_id = self.provider_fs_connection_id(connection_id).await;
+        self.provider.fs_list(&provider_id, path).await
     }
     pub async fn fs_stat(&self, connection_id: &str, path: &str) -> Result<FileEntry, FtpError> {
-        self.provider.fs_stat(connection_id, path).await
+        let provider_id = self.provider_fs_connection_id(connection_id).await;
+        self.provider.fs_stat(&provider_id, path).await
     }
     pub async fn fs_mkdir(&self, connection_id: &str, path: &str) -> Result<(), FtpError> {
-        self.provider.fs_mkdir(connection_id, path).await
+        let provider_id = self.provider_fs_connection_id(connection_id).await;
+        self.provider.fs_mkdir(&provider_id, path).await
     }
     pub async fn fs_rename(
         &self,
@@ -704,7 +720,8 @@ impl<P: SshProvider> SshManager<P> {
         from: &str,
         to: &str,
     ) -> Result<(), FtpError> {
-        self.provider.fs_rename(connection_id, from, to).await
+        let provider_id = self.provider_fs_connection_id(connection_id).await;
+        self.provider.fs_rename(&provider_id, from, to).await
     }
     pub async fn fs_delete(
         &self,
@@ -712,8 +729,9 @@ impl<P: SshProvider> SshManager<P> {
         path: &str,
         recursive: bool,
     ) -> Result<(), FtpError> {
+        let provider_id = self.provider_fs_connection_id(connection_id).await;
         self.provider
-            .fs_delete(connection_id, path, recursive)
+            .fs_delete(&provider_id, path, recursive)
             .await
     }
     pub async fn fs_read_range(
@@ -723,8 +741,9 @@ impl<P: SshProvider> SshManager<P> {
         offset: u64,
         len: u32,
     ) -> Result<FsChunk, FtpError> {
+        let provider_id = self.provider_fs_connection_id(connection_id).await;
         self.provider
-            .fs_read_range(connection_id, path, offset, len)
+            .fs_read_range(&provider_id, path, offset, len)
             .await
     }
     pub async fn fs_write_range(
@@ -735,8 +754,9 @@ impl<P: SshProvider> SshManager<P> {
         data: &[u8],
         truncate: bool,
     ) -> Result<(), FtpError> {
+        let provider_id = self.provider_fs_connection_id(connection_id).await;
         self.provider
-            .fs_write_range(connection_id, path, offset, data, truncate)
+            .fs_write_range(&provider_id, path, offset, data, truncate)
             .await
     }
 
