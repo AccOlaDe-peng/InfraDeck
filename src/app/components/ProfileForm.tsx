@@ -115,9 +115,9 @@ export default function ProfileForm({ editing, onClose, onSaved, onNotify, onErr
 
   return (
     <div className="modal-backdrop connection-form-backdrop" onClick={onClose}>
-      <form className="connection-form connection-form-single" onClick={(event) => event.stopPropagation()} onSubmit={submit}>
+      <form className="connection-form connection-form-single" role="dialog" aria-modal="true" aria-labelledby="connection-form-title" onClick={(event) => event.stopPropagation()} onSubmit={submit}>
         <header className="connection-form-header">
-          <div><span className="connection-form-icon">⌁</span><div><h3>{editing ? '编辑连接' : '新建连接'}</h3><p>{editing ? '更新服务器配置与认证信息' : '添加一台可通过 SSH 管理的服务器'}</p></div></div>
+          <div><span className="connection-form-icon">⌁</span><div><h3 id="connection-form-title">{editing ? '编辑连接' : '新建连接'}</h3><p>{editing ? '更新服务器配置与认证信息' : '添加一台可通过 SSH 管理的服务器'}</p></div></div>
           <button className="connection-form-close" type="button" aria-label="关闭" onClick={onClose}>×</button>
         </header>
 
@@ -138,7 +138,7 @@ export default function ProfileForm({ editing, onClose, onSaved, onNotify, onErr
                   <label>主机地址<input required value={profile.host} onChange={(event) => update('host', event.target.value)} placeholder="192.168.1.10 或 server.example.com" /></label>
                   <label>端口<input required type="number" min={1} max={65535} value={profile.port} onChange={(event) => update('port', Number(event.target.value))} /></label>
                 </div>
-                <label className="connection-username">用户名<input required value={profile.username} onChange={(event) => update('username', event.target.value)} placeholder="root" /></label>
+                <label className="connection-username">用户名<input required autoCapitalize="none" autoCorrect="off" spellCheck={false} value={profile.username} onChange={(event) => update('username', event.target.value)} placeholder="root" /></label>
               </section>
             )}
 

@@ -85,6 +85,7 @@ pub fn validate_remote_path(path: &str) -> Result<(), FtpError> {
     Ok(())
 }
 
+#[cfg_attr(not(test), allow(dead_code))] // 仅单元测试使用
 pub fn join_path(dir: &str, name: &str) -> String {
     let dir = dir.trim_end_matches('/');
     if dir.is_empty() {

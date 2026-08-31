@@ -45,7 +45,7 @@ export default function TopBar(props: Props) {
   }, []);
 
   return (
-    <header className={`topbar ${isMac ? 'topbar-macos' : 'topbar-windows'}`} data-tauri-drag-region>
+    <header className="topbar topbar-windows" data-tauri-drag-region>
       <div className="topbar-actions" data-tauri-drag-region>
         <button className="topbar-btn" onClick={props.onAddServer}><span className="topbar-icon">⌗</span>新建连接</button>
         <button className="topbar-btn" disabled={!props.connected} onClick={props.onOpenTerminal}><span className="topbar-icon">▣</span>打开终端</button>
@@ -71,9 +71,9 @@ export default function TopBar(props: Props) {
           )}
         </div>
       </div>
-      {isMac && <button className="topbar-utility" title="通知">♧</button>}
-      {isMac && <button className="topbar-btn settings-shortcut" onClick={props.onSettings}>⚙ <span>设置</span></button>}
-      {isMac && <span className="user-avatar" aria-label="用户">●</span>}
+      <button className="topbar-utility" title="通知">♧</button>
+      <button className="topbar-btn settings-shortcut" onClick={props.onSettings}>⚙ <span>设置</span></button>
+      <span className="user-avatar" aria-label="用户">●</span>
       {!isMac && (
         <div className="window-controls">
           <button className="window-btn" title="最小化" aria-label="最小化" onClick={() => void getCurrentWindow().minimize()}>─</button>

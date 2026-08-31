@@ -54,7 +54,7 @@ export default function CommandPalette({ open, onClose, commands, toolCommands }
 
   return (
     <div className="modal-backdrop palette-backdrop" onClick={onClose}>
-      <div className="modal palette" onClick={(event) => event.stopPropagation()}>
+      <div className="modal palette" role="dialog" aria-modal="true" aria-label="命令面板" onClick={(event) => event.stopPropagation()}>
         <div className="palette-search"><span>⌕</span><input
           autoFocus
           className="palette-input"

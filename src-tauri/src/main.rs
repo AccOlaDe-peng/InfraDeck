@@ -84,6 +84,15 @@ fn main() {
             commands::fs::fs_transfers_list,
             commands::fs::ss2s_transfer_start,
         ])
+        .setup(|_app| {
+            // Windows/Linux 去掉原生标题栏,由前端 TopBar 自绘窗口按钮;
+            // macOS 走 titleBarStyle=Overlay 保留系统红绿灯。
+            #[cfg(not(target_os = "macos"))]
+            if let Some(win) = _app.get_webview_window("main") {
+                win.set_decorations(false)?;
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running InfraDeck");
 }

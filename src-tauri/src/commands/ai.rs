@@ -527,6 +527,7 @@ impl AiEventBridge {
             run_id,
         }
     }
+    #[cfg_attr(not(test), allow(dead_code))] // qa.rs 测试专用
     pub(crate) fn disabled(run_id: String) -> Self {
         Self { app: None, run_id }
     }

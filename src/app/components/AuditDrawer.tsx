@@ -65,5 +65,5 @@ export default function AuditDrawer({ profiles, onClose, embedded = false }: Pro
       </aside>
     </div>
   </section>;
-  return embedded ? content : <div className="modal-backdrop" onClick={onClose}><div className="audit-modal-shell" onClick={(event) => event.stopPropagation()}>{content}</div></div>;
+  return embedded ? content : <div className="modal-backdrop" onClick={onClose}><div className="audit-modal-shell" role="dialog" aria-modal="true" aria-label="审计记录" onClick={(event) => event.stopPropagation()}>{content}</div></div>;
 }
