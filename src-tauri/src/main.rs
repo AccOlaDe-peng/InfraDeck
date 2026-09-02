@@ -24,6 +24,7 @@ fn main() {
 
     let state = AppState::new().expect("failed to initialize InfraDeck state");
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|_app| {
             // Windows uses the compact in-app command bar as its title bar.
             // Removing native decorations avoids the duplicate app icon/title row.

@@ -699,6 +699,8 @@ footer { margin-top: 22px; color: var(--text-dim); font-size: 11px; }.text-butto
 .transfer-table-head { flex: 0 0 24px; border-bottom: 1px solid var(--border); color: var(--text-dim); background: var(--bg-raise); font-size: 9px; }
 .transfer-table-body { min-height: 0; overflow: auto; }
 .transfer-table-row { min-height: 27px; border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent); color: var(--text-mid); font-size: 9px; }
+.pending-transfer { color: var(--text-dim); background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.pending-transfer .queue-progress { color: var(--text-dim); }
 .transfer-table-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transfer-direction { color: var(--accent); font-size: 13px; text-align: center; }
 .queue-progress { display: flex; align-items: center; gap: 5px; }

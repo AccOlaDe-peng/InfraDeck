@@ -347,7 +347,16 @@ pub async fn fs_transfer_start<R: Runtime + 'static>(
     } else {
         tokio::fs::metadata(&request.local_path)
             .await
-            .map(|meta| meta.len())
+            .and_then(|meta| {
+                if meta.is_file() {
+                    Ok(meta.len())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "仅支持传输普通文件，目录请先打包后上传",
+                    ))
+                }
+            })
             .map_err(|error| AppError::Fs {
                 code: "FS_TRANSFER_FAILED".into(),
                 message: error.to_string(),
