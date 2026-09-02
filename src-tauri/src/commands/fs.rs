@@ -323,6 +323,20 @@ pub async fn fs_transfer_start<R: Runtime + 'static>(
             }
         }
     }
+    if request.kind == "download" && !request.overwrite {
+        let destination_exists = tokio::fs::try_exists(&request.local_path)
+            .await
+            .map_err(|error| AppError::Fs {
+                code: "LOCAL_FS_STAT_FAILED".into(),
+                message: error.to_string(),
+            })?;
+        if destination_exists {
+            return Err(AppError::Fs {
+                code: "FS_EXISTS".into(),
+                message: "本地目标已存在，需显式 overwrite".into(),
+            });
+        }
+    }
     let total_bytes = if request.kind == "download" {
         state
             .ssh
@@ -473,6 +487,28 @@ pub fn fs_transfers_list(state: State<'_, AppState>) -> Result<Vec<TransferJobDt
         .collect())
 }
 
+/// Removes only terminal jobs. Active jobs remain owned by the transfer
+/// manager and cannot disappear from the user-visible queue accidentally.
+#[tauri::command]
+#[instrument(skip(state), target = "infradeck::fs")]
+pub fn fs_transfers_clear_finished(
+    state: State<'_, AppState>,
+    connection_id: String,
+) -> Result<usize, AppError> {
+    let mut transfers = state
+        .transfers
+        .lock()
+        .map_err(|_| AppError::Internal("transfer lock poisoned".into()))?;
+    let before = transfers.len();
+    transfers.retain(|_, handle| {
+        let belongs_to_connection = handle.job.connection_id == connection_id
+            || handle.job.source_connection_id.as_deref() == Some(connection_id.as_str());
+        !belongs_to_connection
+            || !matches!(handle.job.state.as_str(), "completed" | "failed" | "cancelled")
+    });
+    Ok(before - transfers.len())
+}
+
 /// Runs one transfer to completion, emitting throttled progress events. The
 /// loop keeps its local `offset` across pauses, so resume continues from the
 /// exact byte where the transfer was paused (both directions support offset
@@ -490,9 +526,6 @@ async fn run_transfer<R: Runtime + 'static>(
     let mut last_emit = std::time::Instant::now();
     let result: Result<(), FtpError> = async {
         if request.kind == "download" {
-            if !request.overwrite {
-                // Downloads always overwrite the local side deliberately chosen by the user.
-            }
             let mut offset: u64 = 0;
             let mut file = tokio::fs::File::create(&request.local_path)
                 .await

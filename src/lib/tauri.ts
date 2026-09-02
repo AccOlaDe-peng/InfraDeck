@@ -88,5 +88,6 @@ export const api = {
   fsTransferResume: (transferId: string) => call<boolean>('fs_transfer_resume', { transferId }),
   fsTransferCancel: (transferId: string) => call<boolean>('fs_transfer_cancel', { transferId }),
   fsTransfersList: () => call<TransferJob[]>('fs_transfers_list'),
+  fsTransfersClearFinished: (connectionId: string) => call<number>('fs_transfers_clear_finished', { connectionId }),
   ss2sTransferStart: (request: Ss2sTransferRequest) => call<TransferJob>('ss2s_transfer_start', { request }),
 };

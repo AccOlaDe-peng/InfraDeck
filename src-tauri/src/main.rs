@@ -82,6 +82,7 @@ fn main() {
             commands::fs::fs_transfer_resume,
             commands::fs::fs_transfer_cancel,
             commands::fs::fs_transfers_list,
+            commands::fs::fs_transfers_clear_finished,
             commands::fs::ss2s_transfer_start,
         ])
         .setup(|_app| {
